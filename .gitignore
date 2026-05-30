@@ -1,0 +1,11 @@
+data/
+users/
+node_modules/
+artifacts/
+dist/
+android/.gradle/
+android/app/build/
+*.keystore
+.env
+.DS_Store
+*.log
