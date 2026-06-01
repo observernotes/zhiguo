@@ -2,6 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 
 import { api } from '../utils/api';
+import type { RegisterOptimisticSessionInput } from '../contexts/PaletteOpsContext';
+import {
+  isPendingSessionId,
+  resolveProviderSessionListKey,
+} from '../utils/pendingSession';
 import type {
   AppSocketMessage,
   AppTab,
@@ -219,6 +224,55 @@ const isUpdateAdditive = (
     currentSelectedSession.created_at === updatedSelectedSession.created_at &&
     currentSelectedSession.updated_at === updatedSelectedSession.updated_at
   );
+};
+
+const projectIncludesSession = (
+  projectList: Project[],
+  projectId: string,
+  sessionId: string,
+): boolean => {
+  const project = projectList.find((entry) => entry.projectId === projectId);
+  if (!project) {
+    return false;
+  }
+  return getProjectSessions(project).some((session) => session.id === sessionId);
+};
+
+const shouldBlockProjectsUpdateDuringActiveSession = (
+  currentProjects: Project[],
+  updatedProjects: Project[],
+  selectedProject: Project | null,
+  selectedSession: ProjectSession | null,
+): boolean => {
+  if (!selectedProject || !selectedSession) {
+    return false;
+  }
+
+  if (isPendingSessionId(selectedSession.id)) {
+    return false;
+  }
+
+  if (isUpdateAdditive(currentProjects, updatedProjects, selectedProject, selectedSession)) {
+    return false;
+  }
+
+  const projectId = selectedProject.projectId;
+  const sessionId = selectedSession.id;
+  const wasInProject = projectIncludesSession(currentProjects, projectId, sessionId);
+  const isInProject = projectIncludesSession(updatedProjects, projectId, sessionId);
+
+  // Allow the first server sync that adds the live session to the sidebar.
+  if (!wasInProject && isInProject) {
+    return false;
+  }
+
+  // Allow summary/title refresh while the active session keeps its id.
+  if (wasInProject && isInProject) {
+    return false;
+  }
+
+  // Block only if the active session would disappear from the selected project.
+  return wasInProject && !isInProject;
 };
 
 const VALID_TABS: Set<string> = new Set(['chat', 'files', 'shell', 'git', 'tasks', 'preview']);
@@ -446,7 +500,12 @@ export function useProjectsState({
 
     if (
       hasActiveSession &&
-      !isUpdateAdditive(projects, updatedProjects, selectedProject, selectedSession)
+      shouldBlockProjectsUpdateDuringActiveSession(
+        projects,
+        updatedProjects,
+        selectedProject,
+        selectedSession,
+      )
     ) {
       return;
     }
@@ -480,7 +539,9 @@ export function useProjectsState({
     );
 
     if (!updatedSelectedSession) {
-      setSelectedSession(null);
+      if (!isPendingSessionId(selectedSession.id)) {
+        setSelectedSession(null);
+      }
     }
   }, [latestMessage, selectedProject, selectedSession, activeSessions, projects]);
 
@@ -672,6 +733,102 @@ export function useProjectsState({
     },
     [isMobile, navigate],
   );
+
+  const registerOptimisticSession = useCallback(
+    ({ projectId, sessionId, summary, provider }: RegisterOptimisticSessionInput) => {
+      const now = new Date().toISOString();
+      const optimisticSession: ProjectSession = {
+        id: sessionId,
+        summary,
+        created_at: now,
+        updated_at: now,
+        __provider: provider,
+        __projectId: projectId,
+        __optimistic: true,
+      };
+      const listKey = resolveProviderSessionListKey(provider);
+
+      setProjects((previousProjects) =>
+        previousProjects.map((project) => {
+          if (project.projectId !== projectId) {
+            return project;
+          }
+
+          const existingSessions = project[listKey] ?? [];
+          if (existingSessions.some((session) => session.id === sessionId)) {
+            return project;
+          }
+
+          const nextSessions = [optimisticSession, ...existingSessions];
+          const totalSessions = Math.max(
+            Number(project.sessionMeta?.total ?? existingSessions.length),
+            nextSessions.length,
+          );
+
+          return {
+            ...project,
+            [listKey]: nextSessions,
+            sessionMeta: {
+              ...project.sessionMeta,
+              total: totalSessions,
+              hasMore: nextSessions.length < totalSessions,
+            },
+          };
+        }),
+      );
+
+      setSelectedSession(optimisticSession);
+    },
+    [],
+  );
+
+  const promoteOptimisticSession = useCallback((pendingSessionId: string, realSessionId: string) => {
+    setProjects((previousProjects) =>
+      previousProjects.map((project) => {
+        const listKeys = [
+          'sessions',
+          'cursorSessions',
+          'codexSessions',
+          'geminiSessions',
+          'opencodeSessions',
+        ] as const;
+
+        let changed = false;
+        const nextProject: Project = { ...project };
+
+        for (const listKey of listKeys) {
+          const sessions = project[listKey] ?? [];
+          const pendingIndex = sessions.findIndex((session) => session.id === pendingSessionId);
+          if (pendingIndex < 0) {
+            continue;
+          }
+
+          const pendingSession = sessions[pendingIndex];
+          const withoutPending = sessions.filter((session) => session.id !== pendingSessionId);
+          const realExists = withoutPending.some((session) => session.id === realSessionId);
+          const nextSessions = realExists
+            ? withoutPending
+            : [{ ...pendingSession, id: realSessionId, __optimistic: false }, ...withoutPending];
+
+          nextProject[listKey] = nextSessions;
+          changed = true;
+        }
+
+        return changed ? nextProject : project;
+      }),
+    );
+
+    setSelectedSession((previousSession) => {
+      if (!previousSession || previousSession.id !== pendingSessionId) {
+        return previousSession;
+      }
+      return {
+        ...previousSession,
+        id: realSessionId,
+        __optimistic: false,
+      };
+    });
+  }, []);
 
   const handleSessionDelete = useCallback(
     (sessionIdToDelete: string) => {
@@ -894,6 +1051,8 @@ export function useProjectsState({
     openSettings,
     fetchProjects,
     refreshProjectsSilently,
+    registerOptimisticSession,
+    promoteOptimisticSession,
     sidebarSharedProps,
     handleProjectSelect,
     handleSessionSelect,

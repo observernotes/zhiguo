@@ -1,17 +1,22 @@
-<svg
-  xmlns="http://www.w3.org/2000/svg"
-  width="32"
-  height="32"
-  viewBox="0 0 32 32"
-  fill="none"
->
-  <rect width="32" height="32" rx="8" fill="hsl(221.2 83.2% 53.3%)"/>
-  <path
-    d="M8 9C8 8.44772 8.44772 8 9 8H23C23.5523 8 24 8.44772 24 9V18C24 18.5523 23.5523 19 23 19H12L8 23V9Z"
-    stroke="white"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    fill="none"
-  />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" fill="none">
+  <defs>
+    <linearGradient id="logo-bg" x1="20" y1="10" x2="100" y2="110" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFE8D6"/>
+      <stop offset="1" stop-color="#FFCDB2"/>
+    </linearGradient>
+    <linearGradient id="logo-hair" x1="30" y1="8" x2="90" y2="50" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF8C42"/>
+      <stop offset="1" stop-color="#FF6B35"/>
+    </linearGradient>
+  </defs>
+  <rect width="120" height="120" rx="28" fill="url(#logo-bg)"/>
+  <ellipse cx="60" cy="72" rx="34" ry="30" fill="#FFECE0"/>
+  <path d="M26 52C28 24 46 12 60 12C74 12 92 24 94 52C88 36 76 28 60 28C44 28 32 36 26 52Z" fill="url(#logo-hair)"/>
+  <circle cx="46" cy="68" r="4.5" fill="#4A3728"/>
+  <circle cx="74" cy="68" r="4.5" fill="#4A3728"/>
+  <circle cx="47.5" cy="66.5" r="1.5" fill="#fff"/>
+  <circle cx="75.5" cy="66.5" r="1.5" fill="#fff"/>
+  <ellipse cx="40" cy="76" rx="5" ry="3" fill="#FFB4A2" opacity="0.55"/>
+  <ellipse cx="80" cy="76" rx="5" ry="3" fill="#FFB4A2" opacity="0.55"/>
+  <path d="M52 82C56 88 64 88 68 82" stroke="#E07A5F" stroke-width="2.5" stroke-linecap="round"/>
 </svg>

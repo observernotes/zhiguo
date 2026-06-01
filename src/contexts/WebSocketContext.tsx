@@ -2,11 +2,15 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useAuth } from '../components/auth/context/AuthContext';
 import { IS_PLATFORM } from '../constants/config';
 
+export type RealtimeWsListener = (message: any) => void;
+
 type WebSocketContextType = {
   ws: WebSocket | null;
   sendMessage: (message: any) => void;
   latestMessage: any | null;
   isConnected: boolean;
+  /** Fires synchronously for every WS frame (before React state). Use for stream_delta. */
+  subscribeRealtime: (listener: RealtimeWsListener) => () => void;
 };
 
 const WebSocketContext = createContext<WebSocketContextType | null>(null);
@@ -33,7 +37,25 @@ const useWebSocketProviderState = (): WebSocketContextType => {
   const [latestMessage, setLatestMessage] = useState<any>(null);
   const [isConnected, setIsConnected] = useState(false);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const realtimeListenersRef = useRef(new Set<RealtimeWsListener>());
   const { token } = useAuth();
+
+  const subscribeRealtime = useCallback((listener: RealtimeWsListener) => {
+    realtimeListenersRef.current.add(listener);
+    return () => {
+      realtimeListenersRef.current.delete(listener);
+    };
+  }, []);
+
+  const dispatchRealtime = useCallback((data: any) => {
+    for (const listener of realtimeListenersRef.current) {
+      try {
+        listener(data);
+      } catch (error) {
+        console.error('Realtime WebSocket listener error:', error);
+      }
+    }
+  }, []);
 
   useEffect(() => {
     connect();
@@ -72,6 +94,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       websocket.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+          dispatchRealtime(data);
           setLatestMessage(data);
         } catch (error) {
           console.error('Error parsing WebSocket message:', error);
@@ -96,7 +119,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
     } catch (error) {
       console.error('Error creating WebSocket connection:', error);
     }
-  }, [token]); // everytime token changes, we reconnect
+  }, [dispatchRealtime, token]);
 
   const sendMessage = useCallback((message: any) => {
     const socket = wsRef.current;
@@ -112,8 +135,9 @@ const useWebSocketProviderState = (): WebSocketContextType => {
     ws: wsRef.current,
     sendMessage,
     latestMessage,
-    isConnected
-  }), [sendMessage, latestMessage, isConnected]);
+    isConnected,
+    subscribeRealtime,
+  }), [sendMessage, latestMessage, isConnected, subscribeRealtime]);
 
   return value;
 };

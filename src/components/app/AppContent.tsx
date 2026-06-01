@@ -10,8 +10,18 @@ import { PaletteOpsProvider, usePaletteOpsRegister } from '../../contexts/Palett
 import { useDeviceSettings } from '../../hooks/useDeviceSettings';
 import { useSessionProtection } from '../../hooks/useSessionProtection';
 import { useProjectsState } from '../../hooks/useProjectsState';
+import { IS_CONSUMER_MODE } from '../../constants/product';
+import ZhiguoApp from '../../zhiguo/ZhiguoApp';
 
 export default function AppContent() {
+  if (IS_CONSUMER_MODE) {
+    return (
+      <PaletteOpsProvider>
+        <ZhiguoApp />
+      </PaletteOpsProvider>
+    );
+  }
+
   return (
     <PaletteOpsProvider>
       <AppContentInner />
@@ -50,6 +60,8 @@ function AppContentInner() {
     setShowSettings,
     openSettings,
     refreshProjectsSilently,
+    registerOptimisticSession,
+    promoteOptimisticSession,
     sidebarSharedProps,
     handleNewSession,
   } = useProjectsState({
@@ -63,6 +75,8 @@ function AppContentInner() {
   usePaletteOpsRegister({
     openSettings,
     refreshProjects: refreshProjectsSilently,
+    registerOptimisticSession,
+    promoteOptimisticSession,
   });
 
   useEffect(() => {

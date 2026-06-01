@@ -19,8 +19,16 @@ import type {
   ChatMessage,
   PendingPermissionRequest,
   PermissionMode,
+  SessionNavigationOptions,
 } from '../types/types';
 import type { Project, ProjectSession, LLMProvider, ProviderModelsCacheInfo } from '../../../types/app';
+import { IS_CONSUMER_MODE } from '../../../constants/product';
+import { usePaletteOps } from '../../../contexts/PaletteOpsContext';
+import {
+  buildOptimisticSessionSummary,
+  createPendingSessionId,
+  isPendingSessionId,
+} from '../../../utils/pendingSession';
 import { escapeRegExp } from '../utils/chatFormatting';
 
 import { useFileMentions } from './useFileMentions';
@@ -60,6 +68,8 @@ interface UseChatComposerStateArgs {
   setClaudeStatus: (status: { text: string; tokens: number; can_interrupt: boolean } | null) => void;
   setIsUserScrolledUp: (isScrolledUp: boolean) => void;
   setPendingPermissionRequests: Dispatch<SetStateAction<PendingPermissionRequest[]>>;
+  setCurrentSessionId: (sessionId: string | null) => void;
+  onNavigateToSession?: (targetSessionId: string, options?: SessionNavigationOptions) => void;
 }
 
 interface MentionableFile {
@@ -143,6 +153,14 @@ const createFakeSubmitEvent = () => {
   return { preventDefault: () => undefined } as unknown as FormEvent<HTMLFormElement>;
 };
 
+const sanitizeAttachmentDirectory = (value: string | null): string => {
+  const safe = String(value || 'new-session')
+    .replace(/[^a-zA-Z0-9_-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  return safe || 'new-session';
+};
+
 const getNotificationSessionSummary = (
   selectedSession: ProjectSession | null,
   fallbackInput: string,
@@ -191,7 +209,10 @@ export function useChatComposerState({
   setClaudeStatus,
   setIsUserScrolledUp,
   setPendingPermissionRequests,
+  setCurrentSessionId,
+  onNavigateToSession,
 }: UseChatComposerStateArgs) {
+  const paletteOps = usePaletteOps();
   const [input, setInput] = useState(() => {
     if (typeof window !== 'undefined' && selectedProject) {
       // Draft inputs are keyed by the DB projectId so per-project drafts
@@ -201,8 +222,10 @@ export function useChatComposerState({
     return '';
   });
   const [attachedImages, setAttachedImages] = useState<File[]>([]);
+  const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const [uploadingImages, setUploadingImages] = useState<Map<string, number>>(new Map());
   const [imageErrors, setImageErrors] = useState<Map<string, string>>(new Map());
+  const [fileErrors, setFileErrors] = useState<Map<string, string>>(new Map());
   const [isTextareaExpanded, setIsTextareaExpanded] = useState(false);
   const [thinkingMode, setThinkingMode] = useState('none');
   const [commandModalPayload, setCommandModalPayload] = useState<CommandModalPayload | null>(null);
@@ -286,7 +309,7 @@ export function useChatComposerState({
   const handleCustomCommand = useCallback(async (result: CommandExecutionResult) => {
     const { content, hasBashCommands } = result;
 
-    if (hasBashCommands) {
+    if (hasBashCommands && !IS_CONSUMER_MODE) {
       const confirmed = window.confirm(
         'This command contains bash commands that will be executed. Do you want to proceed?',
       );
@@ -448,36 +471,80 @@ export function useChatComposerState({
   }, []);
 
   const handleImageFiles = useCallback((files: File[]) => {
-    const validFiles = files.filter((file) => {
-      try {
-        if (!file || typeof file !== 'object') {
-          console.warn('Invalid file object:', file);
-          return false;
-        }
+    const validFiles: File[] = [];
 
-        if (!file.type || !file.type.startsWith('image/')) {
-          return false;
+    files.forEach((file) => {
+      try {
+        if (!file || typeof file !== 'object' || !file.type?.startsWith('image/')) {
+          return;
         }
 
         if (!file.size || file.size > 5 * 1024 * 1024) {
-          const fileName = file.name || 'Unknown file';
+          const fileName = file.name || 'Unknown image';
           setImageErrors((previous) => {
             const next = new Map(previous);
-            next.set(fileName, 'File too large (max 5MB)');
+            next.set(fileName, 'Image too large (max 5MB)');
             return next;
           });
-          return false;
+          return;
         }
 
-        return true;
+        validFiles.push(file);
       } catch (error) {
-        console.error('Error validating file:', error, file);
-        return false;
+        console.error('Error validating image file:', error, file);
       }
     });
 
     if (validFiles.length > 0) {
       setAttachedImages((previous) => [...previous, ...validFiles].slice(0, 5));
+    }
+  }, []);
+
+  const handleAttachmentFiles = useCallback((files: File[]) => {
+    const imageFiles: File[] = [];
+    const regularFiles: File[] = [];
+
+    files.forEach((file) => {
+      try {
+        if (!file || typeof file !== 'object') {
+          console.warn('Invalid file object:', file);
+          return;
+        }
+
+        if (!file.size || file.size > 50 * 1024 * 1024) {
+          const fileName = file.name || 'Unknown file';
+          const message = 'File too large (max 50MB)';
+          if (file.type?.startsWith('image/')) {
+            setImageErrors((previous) => {
+              const next = new Map(previous);
+              next.set(fileName, message);
+              return next;
+            });
+          } else {
+            setFileErrors((previous) => {
+              const next = new Map(previous);
+              next.set(fileName, message);
+              return next;
+            });
+          }
+          return;
+        }
+
+        if (file.type?.startsWith('image/') && file.size <= 5 * 1024 * 1024) {
+          imageFiles.push(file);
+        } else {
+          regularFiles.push(file);
+        }
+      } catch (error) {
+        console.error('Error validating file:', error, file);
+      }
+    });
+
+    if (imageFiles.length > 0) {
+      setAttachedImages((previous) => [...previous, ...imageFiles].slice(0, 5));
+    }
+    if (regularFiles.length > 0) {
+      setAttachedFiles((previous) => [...previous, ...regularFiles].slice(0, 20));
     }
   }, []);
 
@@ -497,22 +564,16 @@ export function useChatComposerState({
 
       if (items.length === 0 && event.clipboardData.files.length > 0) {
         const files = Array.from(event.clipboardData.files);
-        const imageFiles = files.filter((file) => file.type.startsWith('image/'));
-        if (imageFiles.length > 0) {
-          handleImageFiles(imageFiles);
-        }
+        handleAttachmentFiles(files);
       }
     },
-    [handleImageFiles],
+    [handleAttachmentFiles, handleImageFiles],
   );
 
-  const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
-    accept: {
-      'image/*': ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'],
-    },
-    maxSize: 5 * 1024 * 1024,
-    maxFiles: 5,
-    onDrop: handleImageFiles,
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    maxSize: 50 * 1024 * 1024,
+    maxFiles: 20,
+    onDrop: handleAttachmentFiles,
     noClick: true,
     noKeyboard: true,
   });
@@ -523,7 +584,8 @@ export function useChatComposerState({
     ) => {
       event.preventDefault();
       const currentInput = inputValueRef.current;
-      if (!currentInput.trim() || isLoading || !selectedProject) {
+      const hasAttachments = attachedImages.length > 0 || attachedFiles.length > 0;
+      if ((!currentInput.trim() && !hasAttachments) || isLoading || !selectedProject) {
         return;
       }
 
@@ -551,8 +613,10 @@ export function useChatComposerState({
           setInput('');
           inputValueRef.current = '';
           setAttachedImages([]);
+          setAttachedFiles([]);
           setUploadingImages(new Map());
           setImageErrors(new Map());
+          setFileErrors(new Map());
           resetCommandMenuState();
           setIsTextareaExpanded(false);
           if (textareaRef.current) {
@@ -562,10 +626,30 @@ export function useChatComposerState({
         }
       }
 
-      let messageContent = currentInput;
+      const rawSessionId =
+        currentSessionId || selectedSession?.id || sessionStorage.getItem('cursorSessionId');
+      const effectiveSessionId =
+        rawSessionId && !isPendingSessionId(String(rawSessionId)) ? String(rawSessionId) : null;
+
+      let pendingSessionId: string | null = null;
+      if (!effectiveSessionId && !selectedSession?.id && selectedProject) {
+        pendingSessionId = createPendingSessionId();
+        paletteOps.registerOptimisticSession?.({
+          projectId: selectedProject.projectId,
+          sessionId: pendingSessionId,
+          summary: buildOptimisticSessionSummary(currentInput || attachedFiles[0]?.name || attachedImages[0]?.name || '附件'),
+          provider,
+        });
+        setCurrentSessionId(pendingSessionId);
+        onNavigateToSession?.(pendingSessionId);
+        onSessionActive?.(pendingSessionId);
+        onSessionProcessing?.(pendingSessionId);
+      }
+
+      let messageContent = currentInput.trim() ? currentInput : '请根据附件内容回答。';
       const selectedThinkingMode = thinkingModes.find((mode: { id: string; prefix?: string }) => mode.id === thinkingMode);
       if (selectedThinkingMode && selectedThinkingMode.prefix) {
-        messageContent = `${selectedThinkingMode.prefix}: ${currentInput}`;
+        messageContent = `${selectedThinkingMode.prefix}: ${messageContent}`;
       }
 
       let uploadedImages: unknown[] = [];
@@ -600,12 +684,58 @@ export function useChatComposerState({
         }
       }
 
-      const effectiveSessionId =
-        currentSessionId || selectedSession?.id || sessionStorage.getItem('cursorSessionId');
+      let uploadedFiles: Array<{ name: string; path: string; size?: number; mimeType?: string }> = [];
+      if (attachedFiles.length > 0) {
+        const formData = new FormData();
+        attachedFiles.forEach((file) => {
+          formData.append('files', file);
+        });
+        const attachmentSessionKey = sanitizeAttachmentDirectory(effectiveSessionId || selectedSession?.id || pendingSessionId);
+        formData.append('targetPath', `attachments/${attachmentSessionKey}`);
+
+        try {
+          const response = await authenticatedFetch(`/api/projects/${selectedProject.projectId}/files/upload`, {
+            method: 'POST',
+            headers: {},
+            body: formData,
+          });
+
+          if (!response.ok) {
+            const errorPayload = await response.json().catch(() => ({}));
+            throw new Error(errorPayload.error || 'Failed to upload files');
+          }
+
+          const result = await response.json();
+          uploadedFiles = Array.isArray(result.files) ? result.files : [];
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          console.error('File upload failed:', error);
+          addMessage({
+            type: 'error',
+            content: `Failed to upload files: ${message}`,
+            timestamp: new Date(),
+          });
+          return;
+        }
+      }
+
+      if (uploadedFiles.length > 0) {
+        const resolvedProjectPath = selectedProject.fullPath || selectedProject.path || '';
+        const attachmentLines = uploadedFiles.map((file) => {
+          const filePath = String(file.path || '');
+          const relativePath = resolvedProjectPath && filePath.startsWith(resolvedProjectPath)
+            ? filePath.slice(resolvedProjectPath.length).replace(/^[/\\]/, '')
+            : filePath;
+          return `- ${file.name}: ${relativePath}`;
+        });
+        messageContent = `${messageContent}\n\n附件：\n${attachmentLines.join('\n')}\n\n请根据这些附件内容回答；如需读取附件，请使用上面的路径。`;
+      }
 
       const userMessage: ChatMessage = {
         type: 'user',
-        content: currentInput,
+        content: uploadedFiles.length > 0
+          ? `${currentInput || '请查看附件'}\n\n附件：\n${uploadedFiles.map((file) => `- ${file.name}`).join('\n')}`
+          : currentInput || (uploadedImages.length > 0 ? '请查看图片附件' : ''),
         images: uploadedImages as any,
         timestamp: new Date(),
       };
@@ -622,9 +752,8 @@ export function useChatComposerState({
       setIsUserScrolledUp(false);
       setTimeout(() => scrollToBottom(), 100);
 
-      if (!effectiveSessionId && !selectedSession?.id) {
-        // This tracks only that a request is in flight before the provider has
-        // emitted its real session id; routing still waits for session_created.
+      if (!effectiveSessionId && !pendingSessionId && !selectedSession?.id) {
+        // Tracks in-flight requests before the provider emits its real session id.
         pendingViewSessionRef.current = { startedAt: Date.now() };
       }
       if (effectiveSessionId) {
@@ -655,13 +784,14 @@ export function useChatComposerState({
         return {
           allowedTools: [],
           disallowedTools: [],
-          skipPermissions: false,
+          skipPermissions: IS_CONSUMER_MODE,
         };
       };
 
       const toolsSettings = getToolsSettings();
       const resolvedProjectPath = selectedProject.fullPath || selectedProject.path || '';
       const sessionSummary = getNotificationSessionSummary(selectedSession, currentInput);
+      const effectivePermissionMode = IS_CONSUMER_MODE ? 'bypassPermissions' : permissionMode;
 
       if (provider === 'cursor') {
         sendMessage({
@@ -691,7 +821,7 @@ export function useChatComposerState({
             resume: Boolean(effectiveSessionId),
             model: codexModel,
             sessionSummary,
-            permissionMode: permissionMode === 'plan' ? 'default' : permissionMode,
+            permissionMode: effectivePermissionMode === 'plan' ? 'default' : effectivePermissionMode,
           },
         });
       } else if (provider === 'gemini') {
@@ -706,7 +836,7 @@ export function useChatComposerState({
             resume: Boolean(effectiveSessionId),
             model: geminiModel,
             sessionSummary,
-            permissionMode,
+            permissionMode: effectivePermissionMode,
             toolsSettings,
           },
         });
@@ -734,7 +864,7 @@ export function useChatComposerState({
             sessionId: effectiveSessionId,
             resume: Boolean(effectiveSessionId),
             toolsSettings,
-            permissionMode,
+            permissionMode: effectivePermissionMode,
             model: claudeModel,
             sessionSummary,
             images: uploadedImages,
@@ -746,8 +876,10 @@ export function useChatComposerState({
       inputValueRef.current = '';
       resetCommandMenuState();
       setAttachedImages([]);
+      setAttachedFiles([]);
       setUploadingImages(new Map());
       setImageErrors(new Map());
+      setFileErrors(new Map());
       setIsTextareaExpanded(false);
       setThinkingMode('none');
 
@@ -760,6 +892,7 @@ export function useChatComposerState({
     [
       selectedSession,
       attachedImages,
+      attachedFiles,
       claudeModel,
       codexModel,
       currentSessionId,
@@ -771,6 +904,7 @@ export function useChatComposerState({
       onSessionActive,
       onSessionProcessing,
       pendingViewSessionRef,
+      paletteOps,
       permissionMode,
       provider,
       resetCommandMenuState,
@@ -780,8 +914,10 @@ export function useChatComposerState({
       setCanAbortSession,
       addMessage,
       setClaudeStatus,
+      setCurrentSessionId,
       setIsLoading,
       setIsUserScrolledUp,
+      onNavigateToSession,
       slashCommands,
       thinkingMode,
     ],
@@ -1037,13 +1173,17 @@ export function useChatComposerState({
     renderInputWithMentions,
     selectFile,
     attachedImages,
+    attachedFiles,
+    setAttachedFiles,
     setAttachedImages,
     uploadingImages,
     imageErrors,
+    fileErrors,
     getRootProps,
     getInputProps,
     isDragActive,
-    openImagePicker: open,
+    selectAttachmentFiles: handleAttachmentFiles,
+    selectImageFiles: handleImageFiles,
     handleSubmit,
     handleInputChange,
     handleKeyDown,

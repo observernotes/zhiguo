@@ -86,6 +86,7 @@ import itTasks from './locales/it/tasks.json';
 
 // Import supported languages configuration
 import { languages } from './languages.js';
+import { DEFAULT_LOCALE, IS_CONSUMER_MODE } from '../constants/product.js';
 
 // Get saved language preference from localStorage
 const getSavedLanguage = () => {
@@ -95,7 +96,7 @@ const getSavedLanguage = () => {
     if (saved && languages.some(lang => lang.value === saved)) {
       return saved;
     }
-    return 'en';
+    return IS_CONSUMER_MODE ? DEFAULT_LOCALE : 'en';
   } catch {
     return 'en';
   }

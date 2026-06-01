@@ -2,12 +2,13 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { MutableRefObject } from 'react';
 
 import { authenticatedFetch } from '../../../utils/api';
+import { isPendingSessionId } from '../../../utils/pendingSession';
 import type { Project, ProjectSession, LLMProvider } from '../../../types/app';
 import type { SessionStore, NormalizedMessage } from '../../../stores/useSessionStore';
 import type { ChatMessage, Provider } from '../types/types';
 import { createCachedDiffCalculator, type DiffCalculator } from '../utils/messageTransforms';
 
-import { normalizedToChatMessages } from './useChatMessages';
+import { buildDisplayChatMessages, invalidateDisplayChatMessagesCache } from './buildDisplayChatMessages';
 
 const MESSAGES_PER_PAGE = 20;
 const INITIAL_VISIBLE_MESSAGES = 100;
@@ -217,8 +218,13 @@ export function useChatSessionState({
   // Tell the store which session we're viewing so it only re-renders for this one
   const prevActiveForStoreRef = useRef<string | null>(null);
   if (activeSessionId !== prevActiveForStoreRef.current) {
+    const previousSessionId = prevActiveForStoreRef.current;
+    if (previousSessionId && previousSessionId !== activeSessionId) {
+      sessionStore.clearLiveStream(previousSessionId);
+    }
     prevActiveForStoreRef.current = activeSessionId;
     sessionStore.setActiveSession(activeSessionId);
+    invalidateDisplayChatMessagesCache();
   }
 
   useEffect(() => {
@@ -246,23 +252,27 @@ export function useChatSessionState({
   }, [activeSessionId, pendingUserMessage, sessionStore]);
 
   const storeMessages = activeSessionId ? sessionStore.getMessages(activeSessionId) : [];
+  const liveStream = activeSessionId ? sessionStore.getLiveStream(activeSessionId) : null;
 
   // Reset viewHiddenCount when store messages change
   const prevStoreLenRef = useRef(0);
   if (storeMessages.length !== prevStoreLenRef.current) {
     prevStoreLenRef.current = storeMessages.length;
     if (viewHiddenCount > 0) setViewHiddenCount(0);
+    invalidateDisplayChatMessagesCache();
   }
 
-  const chatMessages = useMemo(() => {
-    const all = normalizedToChatMessages(storeMessages);
-    // Show pending user message when no session data exists yet (new session, pre-backend-response)
-    if (pendingUserMessage && all.length === 0) {
-      return [pendingUserMessage];
-    }
-    if (viewHiddenCount > 0 && viewHiddenCount < all.length) return all.slice(0, -viewHiddenCount);
-    return all;
-  }, [storeMessages, viewHiddenCount, pendingUserMessage]);
+  const chatMessages = useMemo(
+    () =>
+      buildDisplayChatMessages({
+        storeMessages,
+        liveStream,
+        sessionId: activeSessionId,
+        pendingUserMessage,
+        viewHiddenCount,
+      }),
+    [storeMessages, liveStream, activeSessionId, pendingUserMessage, viewHiddenCount],
+  );
 
   /* ---------------------------------------------------------------- */
   /*  addMessage / clearMessages / rewindMessages                     */
@@ -417,6 +427,13 @@ export function useChatSessionState({
 
     const provider = (selectedSession.__provider || localStorage.getItem('selected-provider') as Provider) || 'claude';
     const sessionKey = `${selectedSession.id}:${selectedProject.projectId}:${provider}`;
+
+    if (isPendingSessionId(selectedSession.id)) {
+      setCurrentSessionId(selectedSession.id);
+      lastLoadedSessionKeyRef.current = sessionKey;
+      setIsLoadingSessionMessages(false);
+      return;
+    }
 
     // Skip if already loaded and fresh
     if (lastLoadedSessionKeyRef.current === sessionKey && sessionStore.has(selectedSession.id) && !sessionStore.isStale(selectedSession.id)) {
@@ -659,6 +676,17 @@ export function useChatSessionState({
     return chatMessages.slice(-visibleMessageCount);
   }, [chatMessages, visibleMessageCount]);
 
+  const lastMessageScrollKey = useMemo(() => {
+    const last = chatMessages[chatMessages.length - 1];
+    if (!last) {
+      return 'empty';
+    }
+    const streamPart = liveStream
+      ? `:stream:${liveStream.revision}:${liveStream.text.length}`
+      : '';
+    return `${last.type}:${String(last.content || '').length}:${Boolean(last.isStreaming)}${streamPart}`;
+  }, [chatMessages, liveStream]);
+
   useEffect(() => {
     if (!autoScrollToBottom && scrollContainerRef.current) {
       const container = scrollContainerRef.current;
@@ -682,7 +710,7 @@ export function useChatSessionState({
     const newHeight = container.scrollHeight;
     const heightDiff = newHeight - prevHeight;
     if (heightDiff > 0 && prevTop > 0) container.scrollTop = prevTop + heightDiff;
-  }, [autoScrollToBottom, chatMessages.length, isLoadingMoreMessages, isUserScrolledUp, scrollToBottom]);
+  }, [autoScrollToBottom, chatMessages.length, isLoadingMoreMessages, isUserScrolledUp, lastMessageScrollKey, scrollToBottom]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
@@ -779,6 +807,7 @@ export function useChatSessionState({
 
   return {
     chatMessages,
+    liveStream,
     addMessage,
     clearMessages,
     rewindMessages,

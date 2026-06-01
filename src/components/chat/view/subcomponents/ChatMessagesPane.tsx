@@ -2,6 +2,9 @@ import { useTranslation } from 'react-i18next';
 import { useCallback, useRef } from 'react';
 import type { Dispatch, RefObject, SetStateAction } from 'react';
 
+import { IS_CONSUMER_MODE } from '../../../../constants/product';
+import ConsumerChatMessagesList from '../../../../zhiguo/ConsumerChatMessagesList';
+
 import type { ChatMessage } from '../../types/types';
 import type {
   Project,
@@ -61,6 +64,8 @@ interface ChatMessagesPaneProps {
   showRawParameters?: boolean;
   showThinking?: boolean;
   selectedProject: Project;
+  isLoading?: boolean;
+  hasLiveStream?: boolean;
 }
 
 export default function ChatMessagesPane({
@@ -110,14 +115,28 @@ export default function ChatMessagesPane({
   showRawParameters,
   showThinking,
   selectedProject,
+  isLoading = false,
+  hasLiveStream = false,
 }: ChatMessagesPaneProps) {
   const { t } = useTranslation('chat');
   const messageKeyMapRef = useRef<WeakMap<ChatMessage, string>>(new WeakMap());
   const allocatedKeysRef = useRef<Set<string>>(new Set());
   const generatedMessageKeyCounterRef = useRef(0);
 
-  // Keep keys stable across prepends so existing MessageComponent instances retain local state.
+  // Keep keys stable across prepends and streaming updates (new object refs each tick).
   const getMessageKey = useCallback((message: ChatMessage) => {
+    const stableId =
+      (typeof message.id === 'string' && message.id.trim()) ||
+      (typeof message.messageId === 'string' && message.messageId.trim()) ||
+      (typeof message.toolId === 'string' && message.toolId.trim()) ||
+      null;
+
+    if (stableId) {
+      const stableKey = `message-${message.type}-${stableId}`;
+      allocatedKeysRef.current.add(stableKey);
+      return stableKey;
+    }
+
     const existingKey = messageKeyMapRef.current.get(message);
     if (existingKey) {
       return existingKey;
@@ -249,25 +268,39 @@ export default function ChatMessagesPane({
             </div>
           )}
 
-          {visibleMessages.map((message, index) => {
-            const prevMessage = index > 0 ? visibleMessages[index - 1] : null;
-            return (
-              <MessageComponent
-                key={getMessageKey(message)}
-                message={message}
-                prevMessage={prevMessage}
-                createDiff={createDiff}
-                onFileOpen={onFileOpen}
-                onShowSettings={onShowSettings}
-                onGrantToolPermission={onGrantToolPermission}
-                autoExpandTools={autoExpandTools}
-                showRawParameters={showRawParameters}
-                showThinking={showThinking}
-                selectedProject={selectedProject}
-                provider={provider}
-              />
-            );
-          })}
+          {IS_CONSUMER_MODE ? (
+            <ConsumerChatMessagesList
+              messages={visibleMessages}
+              isLoading={isLoading}
+              hasLiveStream={hasLiveStream}
+              createDiff={createDiff}
+              onFileOpen={onFileOpen}
+              onShowSettings={onShowSettings}
+              onGrantToolPermission={onGrantToolPermission}
+              selectedProject={selectedProject}
+              provider={provider}
+            />
+          ) : (
+            visibleMessages.map((message, index) => {
+              const prevMessage = index > 0 ? visibleMessages[index - 1] : null;
+              return (
+                <MessageComponent
+                  key={getMessageKey(message)}
+                  message={message}
+                  prevMessage={prevMessage}
+                  createDiff={createDiff}
+                  onFileOpen={onFileOpen}
+                  onShowSettings={onShowSettings}
+                  onGrantToolPermission={onGrantToolPermission}
+                  autoExpandTools={autoExpandTools}
+                  showRawParameters={showRawParameters}
+                  showThinking={showThinking}
+                  selectedProject={selectedProject}
+                  provider={provider}
+                />
+              );
+            })
+          )}
         </>
       )}
     </div>

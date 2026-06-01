@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Capacitor } from '@capacitor/core';
 
 type UseDeviceSettingsOptions = {
   mobileBreakpoint?: number;
@@ -12,6 +13,14 @@ const getIsMobile = (mobileBreakpoint: number): boolean => {
   }
 
   return window.innerWidth < mobileBreakpoint;
+};
+
+const getIsNativeApp = (): boolean => {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  return Capacitor.isNativePlatform();
 };
 
 const getIsPWA = (): boolean => {
@@ -41,6 +50,7 @@ export function useDeviceSettings(options: UseDeviceSettingsOptions = {}) {
   const [isPWA, setIsPWA] = useState<boolean>(() => (
     trackPWA ? getIsPWA() : false
   ));
+  const [isNativeApp] = useState<boolean>(() => getIsNativeApp());
 
   useEffect(() => {
     if (!trackMobile || typeof window === 'undefined') {
@@ -84,5 +94,5 @@ export function useDeviceSettings(options: UseDeviceSettingsOptions = {}) {
     };
   }, [trackPWA]);
 
-  return { isMobile, isPWA };
+  return { isMobile, isPWA, isNativeApp, isShellApp: isNativeApp || isPWA };
 }

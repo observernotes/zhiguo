@@ -38,6 +38,12 @@ Thumbs.db
 
 # Logs
 *.log
+deploy/logs/
+deploy/*.pid
+deploy/releases/*.apk
+deploy/logs/
+deploy/cloudcli.pid
+deploy/releases/*.apk
 logs/
 
 # Runtime data

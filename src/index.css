@@ -73,6 +73,34 @@
     --header-base-padding: 8px;
     --header-total-padding: calc(var(--header-safe-area-top) + var(--header-base-padding));
   }
+
+  /* 智果消费模式：暖色、大圆角，接近豆包式视觉 */
+  html[data-consumer='true'] {
+    --background: 30 100% 96%;
+    --foreground: 22 42% 12%;
+    --card: 0 0% 100%;
+    --card-foreground: 22 42% 12%;
+    --primary: 15 100% 60%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 31 100% 95%;
+    --secondary-foreground: 22 42% 18%;
+    --muted: 31 86% 94%;
+    --muted-foreground: 23 25% 43%;
+    --accent: 25 100% 92%;
+    --accent-foreground: 22 42% 16%;
+    --border: 28 80% 88%;
+    --input: 28 80% 88%;
+    --ring: 15 100% 60%;
+    --radius: 1rem;
+    --nav-glass-bg: 32 100% 98% / 0.82;
+    --nav-tab-glow: 15 100% 60% / 0.18;
+    --nav-tab-ring: 15 100% 60% / 0.12;
+    --nav-float-shadow: 24 80% 40% / 0.10;
+    --nav-float-ring: 28 80% 88% / 0.65;
+    --nav-divider-color: 28 80% 88% / 0.7;
+    --nav-input-bg: 31 100% 95% / 0.8;
+    --nav-input-focus-ring: 15 100% 60% / 0.22;
+  }
   
   /* Fallback for older iOS versions */
   @supports (padding-top: constant(safe-area-inset-top)) {
@@ -163,15 +191,41 @@
     padding-left: var(--safe-area-inset-left);
     padding-right: var(--safe-area-inset-right);
     height: 100vh;
+    height: 100dvh;
     overflow: hidden;
   }
 
-  /* Adjust fixed inset positioning in PWA mode */
-  body.pwa-mode .fixed.inset-0 {
+  /* Capacitor / installed shell: WebView fills below status bar; avoid double top offset */
+  body.native-app-mode #root {
+    padding-top: 0;
+  }
+
+  body.native-app-mode .fixed.inset-0 {
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: var(--keyboard-height, 0px);
+  }
+
+  /* Adjust fixed inset positioning in PWA mode (browser installed PWA only) */
+  body.pwa-mode:not(.native-app-mode) .fixed.inset-0 {
     top: var(--header-total-padding);
     left: var(--safe-area-inset-left);
     right: var(--safe-area-inset-right);
     bottom: 0;
+  }
+
+  .native-safe-top {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  .native-safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  .zhiguo-shell-header {
+    padding-top: max(0.75rem, env(safe-area-inset-top, 0px));
+    padding-bottom: 0.75rem;
   }
   
   /* Global transition defaults */

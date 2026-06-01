@@ -242,6 +242,10 @@ export const api = {
       authenticatedFetch('/api/user/complete-onboarding', {
         method: 'POST',
       }),
+    ensureWorkspace: () =>
+      authenticatedFetch('/api/user/ensure-workspace', {
+        method: 'POST',
+      }),
   },
 
   // Generic GET method for any endpoint

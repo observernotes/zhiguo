@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.aicreaverse.cloudcli</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/yuyan/.local/share/fnm/node-versions/v24.16.0/installation/bin/node</string>
+    <string>/Users/yuyan/Documents/code/cloudcli/dist-server/server/index.js</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SERVER_PORT</key>
+    <string>3300</string>
+    <key>HOST</key>
+    <string>0.0.0.0</string>
+    <key>NODE_ENV</key>
+    <string>production</string>
+    <key>CLAUDE_CLI_PATH</key>
+    <string>/Users/yuyan/.local/share/fnm/node-versions/v24.16.0/installation/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe</string>
+    <key>PATH</key>
+    <string>/Users/yuyan/.local/share/fnm/node-versions/v24.16.0/installation/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string>/Users/yuyan</string>
+    <key>ZHIGUO_MODE</key>
+    <string>true</string>
+    <key>ZHIGUO_USERS_ROOT</key>
+    <string>/Users/yuyan/Documents/智果用户</string>
+    <key>WORKSPACES_ROOT</key>
+    <string>/Users/yuyan/Documents/智果用户</string>
+    <key>CODEX_BIN</key>
+    <string>/usr/local/bin/codex</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>/Users/yuyan/Documents/code/cloudcli</string>
+  <key>StandardOutPath</key>
+  <string>/Users/yuyan/Documents/code/cloudcli/deploy/logs/cloudcli.launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/yuyan/Documents/code/cloudcli/deploy/logs/cloudcli.launchd.err.log</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>

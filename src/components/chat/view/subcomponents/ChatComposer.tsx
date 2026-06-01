@@ -11,7 +11,8 @@ import type {
   SetStateAction,
   TouchEvent,
 } from 'react';
-import { ImageIcon, MessageSquareIcon, XIcon, ArrowDownIcon } from 'lucide-react';
+import { FileIcon, ImageIcon, MessageSquareIcon, PaperclipIcon, XIcon, ArrowDownIcon } from 'lucide-react';
+import { IS_CONSUMER_MODE } from '../../../../constants/product';
 import type { PendingPermissionRequest, PermissionMode, Provider } from '../../types/types';
 import CommandMenu from './CommandMenu';
 import ClaudeStatus from './ClaudeStatus';
@@ -71,9 +72,12 @@ interface ChatComposerProps {
   onSubmit: (event: FormEvent<HTMLFormElement> | MouseEvent<HTMLButtonElement> | TouchEvent<HTMLButtonElement>) => void;
   isDragActive: boolean;
   attachedImages: File[];
+  attachedFiles: File[];
   onRemoveImage: (index: number) => void;
+  onRemoveFile: (index: number) => void;
   uploadingImages: Map<string, number>;
   imageErrors: Map<string, string>;
+  fileErrors: Map<string, string>;
   showFileDropdown: boolean;
   filteredFiles: MentionableFile[];
   selectedFileIndex: number;
@@ -86,7 +90,8 @@ interface ChatComposerProps {
   frequentCommands: SlashCommand[];
   getRootProps: (...args: unknown[]) => Record<string, unknown>;
   getInputProps: (...args: unknown[]) => Record<string, unknown>;
-  openImagePicker: () => void;
+  selectAttachmentFiles: (files: File[]) => void;
+  selectImageFiles: (files: File[]) => void;
   inputHighlightRef: RefObject<HTMLDivElement>;
   renderInputWithMentions: (text: string) => ReactNode;
   textareaRef: RefObject<HTMLTextAreaElement>;
@@ -126,9 +131,12 @@ export default function ChatComposer({
   onSubmit,
   isDragActive,
   attachedImages,
+  attachedFiles,
   onRemoveImage,
+  onRemoveFile,
   uploadingImages,
   imageErrors,
+  fileErrors,
   showFileDropdown,
   filteredFiles,
   selectedFileIndex,
@@ -141,7 +149,8 @@ export default function ChatComposer({
   frequentCommands,
   getRootProps,
   getInputProps,
-  openImagePicker,
+  selectAttachmentFiles,
+  selectImageFiles,
   inputHighlightRef,
   renderInputWithMentions,
   textareaRef,
@@ -174,8 +183,8 @@ export default function ChatComposer({
   const hasPendingPermissions = pendingPermissionRequests.length > 0;
 
   return (
-    <div className="flex-shrink-0 p-2 pb-2 sm:p-4 sm:pb-4 md:p-4 md:pb-6">
-      {!hasPendingPermissions && (
+    <div className="flex-shrink-0 p-2 pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] sm:p-4 sm:pb-4 md:p-4 md:pb-6">
+      {!hasPendingPermissions && !IS_CONSUMER_MODE && (
         <ClaudeStatus
           status={claudeStatus}
           isLoading={isLoading}
@@ -184,7 +193,7 @@ export default function ChatComposer({
         />
       )}
 
-      {pendingPermissionRequests.length > 0 && (
+      {pendingPermissionRequests.length > 0 && !IS_CONSUMER_MODE && (
         <div className="mx-auto mb-3 max-w-4xl">
           <PermissionRequestsBanner
             pendingPermissionRequests={pendingPermissionRequests}
@@ -247,7 +256,9 @@ export default function ChatComposer({
         <PromptInput
           onSubmit={onSubmit as (event: FormEvent<HTMLFormElement>) => void}
           status={isLoading ? 'streaming' : 'ready'}
-          className={isTextareaExpanded ? 'chat-input-expanded' : ''}
+          className={`${isTextareaExpanded ? 'chat-input-expanded' : ''} ${
+            IS_CONSUMER_MODE ? 'border-orange-100 bg-white shadow-lg shadow-orange-100/50 ring-1 ring-orange-50' : ''
+          }`.trim()}
           {...getRootProps()}
         >
           {isDragActive && (
@@ -261,12 +272,12 @@ export default function ChatComposer({
                     d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
                   />
                 </svg>
-                <p className="text-sm font-medium">Drop images here</p>
+                <p className="text-sm font-medium">Drop files here</p>
               </div>
             </div>
           )}
 
-          {attachedImages.length > 0 && (
+          {(attachedImages.length > 0 || attachedFiles.length > 0) && (
             <PromptInputHeader>
               <div className="rounded-xl bg-muted/40 p-2">
                 <div className="flex flex-wrap gap-2">
@@ -278,6 +289,35 @@ export default function ChatComposer({
                       uploadProgress={uploadingImages.get(file.name)}
                       error={imageErrors.get(file.name)}
                     />
+                  ))}
+                  {attachedFiles.map((file, index) => (
+                    <div
+                      key={`${file.name}-${index}`}
+                      className="group relative flex max-w-[220px] items-center gap-2 rounded-lg border border-border/50 bg-background px-2 py-1.5 text-xs"
+                    >
+                      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+                        <FileIcon className="h-4 w-4" />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate font-medium text-foreground">{file.name}</span>
+                        <span className="block text-[10px] text-muted-foreground">
+                          {(file.size / 1024 / 1024).toFixed(file.size > 1024 * 1024 ? 1 : 2)} MB
+                        </span>
+                      </span>
+                      {fileErrors.get(file.name) && (
+                        <span className="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/80 px-2 text-center text-[10px] text-white">
+                          {fileErrors.get(file.name)}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => onRemoveFile(index)}
+                        className="absolute -right-2 -top-2 rounded-full bg-red-500 p-1 text-white opacity-100 transition-opacity focus:opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+                        aria-label="Remove file"
+                      >
+                        <XIcon className="h-3 w-3" />
+                      </button>
+                    </div>
                   ))}
                 </div>
               </div>
@@ -310,13 +350,42 @@ export default function ChatComposer({
 
         <PromptInputFooter>
           <PromptInputTools>
-            <PromptInputButton
-              tooltip={{ content: t('input.attachImages') }}
-              onClick={openImagePicker}
-            >
-              <ImageIcon />
-            </PromptInputButton>
+            <label className="inline-flex h-8 w-8 touch-manipulation cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground active:bg-accent/80">
+              <ImageIcon className="h-4 w-4" />
+              <span className="sr-only">{t('input.attachImages')}</span>
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                className="sr-only"
+                onChange={(event) => {
+                  const files = Array.from(event.currentTarget.files || []);
+                  if (files.length > 0) {
+                    selectImageFiles(files);
+                  }
+                  event.currentTarget.value = '';
+                }}
+              />
+            </label>
 
+            <label className="inline-flex h-8 w-8 touch-manipulation cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground active:bg-accent/80">
+              <PaperclipIcon className="h-4 w-4" />
+              <span className="sr-only">上传附件</span>
+              <input
+                type="file"
+                multiple
+                className="sr-only"
+                onChange={(event) => {
+                  const files = Array.from(event.currentTarget.files || []);
+                  if (files.length > 0) {
+                    selectAttachmentFiles(files);
+                  }
+                  event.currentTarget.value = '';
+                }}
+              />
+            </label>
+
+            {!IS_CONSUMER_MODE && (
             <button
               type="button"
               onClick={onModeSwitch}
@@ -356,13 +425,15 @@ export default function ChatComposer({
                 </span>
               </div>
             </button>
+            )}
 
-            {provider === 'claude' && (
+            {!IS_CONSUMER_MODE && provider === 'claude' && (
               <ThinkingModeSelector selectedMode={thinkingMode} onModeChange={setThinkingMode} onClose={() => {}} className="" />
             )}
 
-            <TokenUsageSummary usage={tokenBudget} />
+            {!IS_CONSUMER_MODE && <TokenUsageSummary usage={tokenBudget} />}
 
+            {!IS_CONSUMER_MODE && (
             <PromptInputButton
               tooltip={{ content: t('input.showAllCommands') }}
               onClick={onToggleCommandMenu}
@@ -377,6 +448,7 @@ export default function ChatComposer({
                 </span>
               )}
             </PromptInputButton>
+            )}
 
             {hasInput && (
               <PromptInputButton
@@ -391,15 +463,17 @@ export default function ChatComposer({
           </PromptInputTools>
 
           <div className="flex items-center gap-2">
-            <div
-              className={`hidden text-xs text-muted-foreground/50 transition-opacity duration-200 lg:block ${
-                input.trim() ? 'opacity-0' : 'opacity-100'
-              }`}
-            >
-              {sendByCtrlEnter ? t('input.hintText.ctrlEnter') : t('input.hintText.enter')}
-            </div>
+            {!IS_CONSUMER_MODE && (
+              <div
+                className={`hidden text-xs text-muted-foreground/50 transition-opacity duration-200 lg:block ${
+                  input.trim() ? 'opacity-0' : 'opacity-100'
+                }`}
+              >
+                {sendByCtrlEnter ? t('input.hintText.ctrlEnter') : t('input.hintText.enter')}
+              </div>
+            )}
             <PromptInputSubmit
-              disabled={!input.trim() || isLoading}
+              disabled={(!input.trim() && attachedImages.length === 0 && attachedFiles.length === 0) || isLoading}
               className="h-10 w-10 sm:h-10 sm:w-10"
             />
           </div>

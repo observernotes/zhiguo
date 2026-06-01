@@ -159,6 +159,8 @@
   "providerSelection": {
     "title": "选择您的 AI 助手",
     "description": "选择一个供应商以开始新对话",
+    "consumerTitle": "你好，我是{{product}}",
+    "consumerDescription": "直接输入问题即可。我可以帮你写作、翻译、学习、整理思路与处理日常任务。",
     "selectModel": "选择模型",
     "providerInfo": {
       "anthropic": "由 Anthropic 提供",

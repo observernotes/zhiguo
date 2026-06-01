@@ -1,6 +1,7 @@
 import { MessageSquare, Terminal, Folder, GitBranch, ClipboardCheck, type LucideIcon } from 'lucide-react';
 import type { Dispatch, SetStateAction } from 'react';
 import { useTranslation } from 'react-i18next';
+import { IS_CONSUMER_MODE } from '../../../../constants/product';
 import { Tooltip, PillBar, Pill } from '../../../../shared/view/ui';
 import type { AppTab } from '../../../../types/app';
 import { usePlugins } from '../../../../contexts/PluginsContext';
@@ -51,9 +52,15 @@ export default function MainContentTabSwitcher({
   const { t } = useTranslation();
   const { plugins } = usePlugins();
 
-  const builtInTabs: BuiltInTab[] = shouldShowTasksTab ? [...BASE_TABS, TASKS_TAB] : BASE_TABS;
+  const builtInTabs: BuiltInTab[] = IS_CONSUMER_MODE
+    ? [{ kind: 'builtin', id: 'chat', labelKey: 'tabs.chat', icon: MessageSquare }]
+    : shouldShowTasksTab
+      ? [...BASE_TABS, TASKS_TAB]
+      : BASE_TABS;
 
-  const pluginTabs: PluginTab[] = plugins
+  const pluginTabs: PluginTab[] = IS_CONSUMER_MODE
+    ? []
+    : plugins
     .filter((p) => p.enabled)
     .map((p) => ({
       kind: 'plugin',

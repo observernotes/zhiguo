@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 
 import { useDeviceSettings } from '../../../hooks/useDeviceSettings';
 import { useVersionCheck } from '../../../hooks/useVersionCheck';
+import { IS_CONSUMER_MODE } from '../../../constants/product';
 import { useUiPreferences } from '../../../hooks/useUiPreferences';
 import { useSidebarController } from '../hooks/useSidebarController';
 import { useTaskMaster } from '../../../contexts/TaskMasterContext';
@@ -42,10 +43,15 @@ function Sidebar({
 }: SidebarProps) {
   const { t } = useTranslation(['sidebar', 'common']);
   const { isPWA } = useDeviceSettings({ trackMobile: false });
-  const { updateAvailable, latestVersion, currentVersion, releaseInfo, installMode } = useVersionCheck(
+  const versionCheck = useVersionCheck(
     'siteboon',
     'claudecodeui',
   );
+  const updateAvailable = IS_CONSUMER_MODE ? false : versionCheck.updateAvailable;
+  const latestVersion = IS_CONSUMER_MODE ? versionCheck.currentVersion : versionCheck.latestVersion;
+  const currentVersion = versionCheck.currentVersion;
+  const releaseInfo = IS_CONSUMER_MODE ? null : versionCheck.releaseInfo;
+  const installMode = versionCheck.installMode;
   const { preferences, setPreference } = useUiPreferences();
   const { sidebarVisible } = preferences;
   const { setCurrentProject, mcpServerStatus } = useTaskMaster() as TaskMasterSidebarContext;

@@ -2,6 +2,10 @@ import express from 'express';
 import { userDb } from '../modules/database/index.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { getSystemGitConfig } from '../utils/gitConfig.js';
+import {
+  isZhiguoMode,
+  provisionUserWorkspace,
+} from '../services/zhiguo-user-workspace.service.js';
 import { spawn } from 'child_process';
 
 const router = express.Router();
@@ -108,7 +112,7 @@ router.post('/complete-onboarding', authenticateToken, async (req, res) => {
 router.get('/onboarding-status', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
-    const hasCompleted = userDb.hasCompletedOnboarding(userId);
+    const hasCompleted = isZhiguoMode() ? true : userDb.hasCompletedOnboarding(userId);
 
     res.json({
       success: true,
@@ -117,6 +121,28 @@ router.get('/onboarding-status', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Error checking onboarding status:', error);
     res.status(500).json({ error: 'Failed to check onboarding status' });
+  }
+});
+
+router.post('/ensure-workspace', authenticateToken, async (req, res) => {
+  try {
+    if (!isZhiguoMode()) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+
+    const { workspacePath, projectId } = await provisionUserWorkspace(
+      req.user.id,
+      req.user.username,
+    );
+
+    res.json({
+      success: true,
+      workspacePath,
+      projectId,
+    });
+  } catch (error) {
+    console.error('Error ensuring workspace:', error);
+    res.status(500).json({ error: 'Failed to prepare user workspace' });
   }
 });
 

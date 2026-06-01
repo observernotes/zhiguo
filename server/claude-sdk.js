@@ -141,6 +141,10 @@ function matchesToolPermission(entry, toolName, input) {
   return false;
 }
 
+function isZhiguoMode() {
+  return process.env.ZHIGUO_MODE === 'true';
+}
+
 /**
  * Maps CLI options to SDK-compatible options format
  * @param {Object} options - CLI options
@@ -165,7 +169,9 @@ function mapCliOptionsToSDK(options = {}) {
   }
 
   // Map permission mode
-  if (permissionMode && permissionMode !== 'default') {
+  if (isZhiguoMode()) {
+    sdkOptions.permissionMode = 'bypassPermissions';
+  } else if (permissionMode && permissionMode !== 'default') {
     sdkOptions.permissionMode = permissionMode;
   }
 
@@ -173,16 +179,25 @@ function mapCliOptionsToSDK(options = {}) {
   const settings = toolsSettings || {
     allowedTools: [],
     disallowedTools: [],
-    skipPermissions: false
+    skipPermissions: isZhiguoMode(),
   };
 
   // Handle tool permissions
-  if (settings.skipPermissions && permissionMode !== 'plan') {
+  if ((settings.skipPermissions || isZhiguoMode()) && permissionMode !== 'plan') {
     // When skipping permissions, use bypassPermissions mode
     sdkOptions.permissionMode = 'bypassPermissions';
   }
 
   let allowedTools = [...(settings.allowedTools || [])];
+
+  if (isZhiguoMode()) {
+    sdkOptions.env.PATH = `/usr/local/bin:/opt/homebrew/bin:${sdkOptions.env.PATH || process.env.PATH || ''}`;
+    for (const entry of ['Bash(node *)', 'Bash(codex *)', 'Skill']) {
+      if (!allowedTools.includes(entry)) {
+        allowedTools.push(entry);
+      }
+    }
+  }
 
   // Add plan mode default tools
   if (permissionMode === 'plan') {
@@ -200,6 +215,11 @@ function mapCliOptionsToSDK(options = {}) {
   // This was introduced in SDK 0.1.57. Omitting this preserves existing behavior (all tools available),
   // but being explicit ensures forward compatibility and clarity.
   sdkOptions.tools = { type: 'preset', preset: 'claude_code' };
+
+  // Stream partial assistant messages so the web UI renders text token-by-token
+  // instead of waiting for the full turn. The SDK emits `stream_event` wrappers
+  // that transformMessage() unwraps into raw Anthropic stream events.
+  sdkOptions.includePartialMessages = true;
 
   sdkOptions.disallowedTools = settings.disallowedTools || [];
 
@@ -275,6 +295,19 @@ function getAllSessions() {
  * @returns {Object} Transformed message ready for WebSocket
  */
 function transformMessage(sdkMessage) {
+  // Unwrap SDK partial-stream events (enabled via includePartialMessages) into
+  // the raw Anthropic stream event (content_block_delta / content_block_stop)
+  // so the normalizer can emit stream_delta / stream_end for token-by-token UI.
+  if (sdkMessage.type === 'stream_event' && sdkMessage.event) {
+    if (sdkMessage.parent_tool_use_id) {
+      return {
+        ...sdkMessage.event,
+        parentToolUseId: sdkMessage.parent_tool_use_id
+      };
+    }
+    return sdkMessage.event;
+  }
+
   // Extract parent_tool_use_id for subagent tool grouping
   if (sdkMessage.parent_tool_use_id) {
     return {
@@ -568,6 +601,10 @@ async function queryClaudeSDK(command, options = {}, ws) {
     // tools to a PreToolUse hook (runs before the mode check) if we need them
     // to work in those modes.
     sdkOptions.canUseTool = async (toolName, input, context) => {
+      if (isZhiguoMode()) {
+        return { behavior: 'allow', updatedInput: input };
+      }
+
       const requiresInteraction = TOOLS_REQUIRING_INTERACTION.has(toolName);
 
       if (!requiresInteraction) {

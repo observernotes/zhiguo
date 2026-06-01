@@ -1,6 +1,7 @@
 import React, { useCallback, useMemo, useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
+import { IS_CONSUMER_MODE, PRODUCT_NAME, ZHIGUO_MASCOT_SRC } from "../../../../constants/product";
 
 import type {
   ProjectSession,
@@ -184,6 +185,54 @@ export default function ProviderSelectionEmptyState({
   );
 
   if (!selectedSession && !currentSessionId) {
+    if (IS_CONSUMER_MODE) {
+      const suggestions = [
+        '帮我写一封礼貌的邮件',
+        '用简单的话解释一个概念',
+        '给我三个今晚的晚餐建议',
+        '帮我整理一下今天的待办',
+      ];
+
+      return (
+        <div className="flex h-full items-center justify-center px-4 py-8">
+          <div className="w-full max-w-xl text-center">
+            <img
+              src={ZHIGUO_MASCOT_SRC}
+              alt={PRODUCT_NAME}
+              className="mx-auto h-24 w-24 rounded-3xl object-cover shadow-lg shadow-orange-100"
+            />
+            <h2 className="mt-6 text-2xl font-bold text-gray-900">
+              {t('providerSelection.consumerTitle', {
+                product: PRODUCT_NAME,
+                defaultValue: `你好，我是${PRODUCT_NAME}`,
+              })}
+            </h2>
+            <p className="mt-3 text-sm leading-relaxed text-gray-500">
+              {t('providerSelection.consumerDescription', {
+                defaultValue:
+                  '像和朋友聊天一样提问就好。写作、学习、生活琐事，我都可以帮你。',
+              })}
+            </p>
+            <div className="mt-8 flex flex-wrap justify-center gap-2">
+              {suggestions.map((text) => (
+                <button
+                  key={text}
+                  type="button"
+                  onClick={() => {
+                    setInput(text);
+                    setTimeout(() => textareaRef.current?.focus(), 80);
+                  }}
+                  className="rounded-full border border-orange-100 bg-white px-4 py-2 text-sm text-gray-700 shadow-sm transition hover:border-orange-200 hover:bg-orange-50 active:scale-[0.98]"
+                >
+                  {text}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="flex h-full items-center justify-center px-4">
         <div className="w-full max-w-md">

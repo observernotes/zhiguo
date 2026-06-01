@@ -84,6 +84,13 @@ export interface NormalizedMessage {
 
 export type SessionStatus = 'idle' | 'loading' | 'streaming' | 'error';
 
+export type LiveStreamSlot = {
+  text: string;
+  provider: LLMProvider;
+  /** Bumps on each patch so UI can update without re-merging history */
+  revision: number;
+};
+
 export interface SessionSlot {
   serverMessages: NormalizedMessage[];
   realtimeMessages: NormalizedMessage[];
@@ -91,6 +98,8 @@ export interface SessionSlot {
   /** @internal Cache-invalidation refs for computeMerged */
   _lastServerRef: NormalizedMessage[];
   _lastRealtimeRef: NormalizedMessage[];
+  /** In-flight assistant text; avoids rewriting merged[] every token */
+  liveStream: LiveStreamSlot | null;
   status: SessionStatus;
   fetchedAt: number;
   total: number;
@@ -108,6 +117,7 @@ function createEmptySlot(): SessionSlot {
     merged: EMPTY,
     _lastServerRef: EMPTY,
     _lastRealtimeRef: EMPTY,
+    liveStream: null,
     status: 'idle',
     fetchedAt: 0,
     total: 0,
@@ -259,6 +269,12 @@ function recomputeMergedIfNeeded(slot: SessionSlot): boolean {
 const STALE_THRESHOLD_MS = 30_000;
 
 const MAX_REALTIME_MESSAGES = 500;
+
+const STREAMING_ROW_PREFIX = '__streaming_';
+
+function streamingRowId(sessionId: string): string {
+  return `${STREAMING_ROW_PREFIX}${sessionId}`;
+}
 
 // ─── Hook ────────────────────────────────────────────────────────────────────
 
@@ -518,54 +534,88 @@ export function useSessionStore() {
   }, [resolveSessionId]);
 
   /**
-   * Update or create a streaming message (accumulated text so far).
-   * Uses a well-known ID so subsequent calls replace the same message.
+   * Patch in-flight stream text without touching merged history (hot path).
    */
-  const updateStreaming = useCallback((sessionId: string, accumulatedText: string, msgProvider: LLMProvider) => {
+  const patchLiveStream = useCallback((sessionId: string, accumulatedText: string, msgProvider: LLMProvider) => {
     const resolvedSessionId = resolveSessionId(sessionId) ?? sessionId;
     const slot = getSlot(resolvedSessionId);
-    const streamId = `__streaming_${resolvedSessionId}`;
-    const msg: NormalizedMessage = {
-      id: streamId,
-      sessionId: resolvedSessionId,
-      timestamp: new Date().toISOString(),
-      provider: msgProvider,
-      kind: 'stream_delta',
-      content: accumulatedText,
-    };
-    const idx = slot.realtimeMessages.findIndex(m => m.id === streamId);
-    if (idx >= 0) {
-      slot.realtimeMessages = [...slot.realtimeMessages];
-      slot.realtimeMessages[idx] = msg;
-    } else {
-      slot.realtimeMessages = [...slot.realtimeMessages, msg];
+    const previous = slot.liveStream;
+    if (previous?.text === accumulatedText && previous.provider === msgProvider) {
+      return;
     }
-    recomputeMergedIfNeeded(slot);
+    slot.liveStream = {
+      text: accumulatedText,
+      provider: msgProvider,
+      revision: (previous?.revision ?? 0) + 1,
+    };
+    slot.status = 'streaming';
     notify(resolvedSessionId);
   }, [getSlot, notify, resolveSessionId]);
 
+  const getLiveStream = useCallback((sessionId: string): LiveStreamSlot | null => {
+    const resolvedSessionId = resolveSessionId(sessionId) ?? sessionId;
+    return storeRef.current.get(resolvedSessionId)?.liveStream ?? null;
+  }, [resolveSessionId]);
+
+  const clearLiveStream = useCallback((sessionId: string) => {
+    const resolvedSessionId = resolveSessionId(sessionId) ?? sessionId;
+    const slot = storeRef.current.get(resolvedSessionId);
+    if (!slot?.liveStream) {
+      return;
+    }
+    const streamId = streamingRowId(resolvedSessionId);
+    slot.liveStream = null;
+    if (slot.realtimeMessages.some((message) => message.id === streamId)) {
+      slot.realtimeMessages = slot.realtimeMessages.filter((message) => message.id !== streamId);
+      recomputeMergedIfNeeded(slot);
+    }
+    if (slot.status === 'streaming') {
+      slot.status = 'idle';
+    }
+    notify(resolvedSessionId);
+  }, [notify, resolveSessionId]);
+
+  /** @deprecated Prefer patchLiveStream — kept for callers that still use the name */
+  const updateStreaming = patchLiveStream;
+
   /**
-   * Finalize streaming: convert the streaming message to a regular text message.
-   * The well-known streaming ID is replaced with a unique text message ID.
+   * Finalize streaming: persist assistant text once, clear live overlay.
    */
   const finalizeStreaming = useCallback((sessionId: string) => {
     const resolvedSessionId = resolveSessionId(sessionId) ?? sessionId;
     const slot = storeRef.current.get(resolvedSessionId);
-    if (!slot) return;
-    const streamId = `__streaming_${resolvedSessionId}`;
-    const idx = slot.realtimeMessages.findIndex(m => m.id === streamId);
-    if (idx >= 0) {
-      const stream = slot.realtimeMessages[idx];
-      slot.realtimeMessages = [...slot.realtimeMessages];
-      slot.realtimeMessages[idx] = {
-        ...stream,
-        id: `text_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        kind: 'text',
-        role: 'assistant',
-      };
-      recomputeMergedIfNeeded(slot);
-      notify(resolvedSessionId);
+    if (!slot) {
+      return;
     }
+
+    const streamId = streamingRowId(resolvedSessionId);
+    const liveText = slot.liveStream?.text ?? '';
+    const liveProvider = slot.liveStream?.provider ?? 'claude';
+
+    slot.liveStream = null;
+    slot.realtimeMessages = slot.realtimeMessages.filter((message) => message.id !== streamId);
+
+    if (liveText.length > 0) {
+      slot.realtimeMessages = [
+        ...slot.realtimeMessages,
+        {
+          id: `text_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          sessionId: resolvedSessionId,
+          timestamp: new Date().toISOString(),
+          provider: liveProvider,
+          kind: 'text',
+          role: 'assistant',
+          content: liveText,
+        },
+      ];
+      if (slot.realtimeMessages.length > MAX_REALTIME_MESSAGES) {
+        slot.realtimeMessages = slot.realtimeMessages.slice(-MAX_REALTIME_MESSAGES);
+      }
+    }
+
+    slot.status = 'idle';
+    recomputeMergedIfNeeded(slot);
+    notify(resolvedSessionId);
   }, [notify, resolveSessionId]);
 
   /**
@@ -641,6 +691,10 @@ export function useSessionStore() {
       targetSlot.hasMore = targetSlot.hasMore || sourceSlot.hasMore;
       targetSlot.offset = Math.max(targetSlot.offset, sourceSlot.offset);
       targetSlot.tokenUsage = targetSlot.tokenUsage ?? sourceSlot.tokenUsage;
+      if (sourceSlot.liveStream) {
+        targetSlot.liveStream = sourceSlot.liveStream;
+        sourceSlot.liveStream = null;
+      }
       recomputeMergedIfNeeded(targetSlot);
 
       store.set(resolvedToSessionId, targetSlot);
@@ -674,8 +728,11 @@ export function useSessionStore() {
     setActiveSession,
     setStatus,
     isStale,
+    patchLiveStream,
     updateStreaming,
     finalizeStreaming,
+    clearLiveStream,
+    getLiveStream,
     clearRealtime,
     getMessages,
     getSessionSlot,
@@ -683,7 +740,8 @@ export function useSessionStore() {
   }), [
     getSlot, has, fetchFromServer, fetchMore,
     appendRealtime, appendRealtimeBatch, refreshFromServer,
-    setActiveSession, setStatus, isStale, updateStreaming, finalizeStreaming,
+    setActiveSession, setStatus, isStale, patchLiveStream, updateStreaming,
+    finalizeStreaming, clearLiveStream, getLiveStream,
     clearRealtime, getMessages, getSessionSlot, replaceSessionId,
   ]);
 }

@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { useTasksSettings } from '../../../contexts/TasksSettingsContext';
 import PermissionContext from '../../../contexts/PermissionContext';
 import { QuickSettingsPanel } from '../../quick-settings-panel';
+import { IS_CONSUMER_MODE } from '../../../constants/product';
 import type { ChatInterfaceProps, Provider  } from '../types/types';
 import type { LLMProvider } from '../../../types/app';
 import { useChatProviderState } from '../hooks/useChatProviderState';
@@ -55,7 +56,7 @@ function ChatInterface({
 
   const resetStreamingState = useCallback(() => {
     if (streamTimerRef.current) {
-      clearTimeout(streamTimerRef.current);
+      cancelAnimationFrame(streamTimerRef.current);
       streamTimerRef.current = null;
     }
     accumulatedStreamRef.current = '';
@@ -91,6 +92,7 @@ function ChatInterface({
 
   const {
     chatMessages,
+    liveStream,
     addMessage,
     isLoading,
     setIsLoading,
@@ -158,13 +160,17 @@ function ChatInterface({
     renderInputWithMentions,
     selectFile,
     attachedImages,
+    attachedFiles,
     setAttachedImages,
+    setAttachedFiles,
     uploadingImages,
     imageErrors,
+    fileErrors,
     getRootProps,
     getInputProps,
     isDragActive,
-    openImagePicker,
+    selectAttachmentFiles,
+    selectImageFiles,
     handleSubmit,
     handleInputChange,
     handleKeyDown,
@@ -210,6 +216,8 @@ function ChatInterface({
     setClaudeStatus,
     setIsUserScrolledUp,
     setPendingPermissionRequests,
+    setCurrentSessionId,
+    onNavigateToSession,
   });
 
   // On WebSocket reconnect, re-fetch the current session's messages from the server
@@ -275,6 +283,19 @@ function ChatInterface({
       resetStreamingState();
     };
   }, [resetStreamingState]);
+
+  useEffect(() => {
+    if (!IS_CONSUMER_MODE || pendingPermissionRequests.length === 0) {
+      return;
+    }
+    const requestIds = pendingPermissionRequests
+      .map((request) => request.requestId)
+      .filter(Boolean);
+    if (requestIds.length === 0) {
+      return;
+    }
+    handlePermissionDecision(requestIds, { allow: true });
+  }, [pendingPermissionRequests, handlePermissionDecision]);
 
   const permissionContextValue = useMemo(() => ({
     pendingPermissionRequests,
@@ -357,6 +378,8 @@ function ChatInterface({
           showRawParameters={showRawParameters}
           showThinking={showThinking}
           selectedProject={selectedProject}
+          isLoading={isLoading}
+          hasLiveStream={Boolean(liveStream)}
         />
 
         <ChatComposer
@@ -382,13 +405,20 @@ function ChatInterface({
           onSubmit={handleSubmit}
           isDragActive={isDragActive}
           attachedImages={attachedImages}
+          attachedFiles={attachedFiles}
           onRemoveImage={(index) =>
             setAttachedImages((previous) =>
               previous.filter((_, currentIndex) => currentIndex !== index),
             )
           }
+          onRemoveFile={(index) =>
+            setAttachedFiles((previous) =>
+              previous.filter((_, currentIndex) => currentIndex !== index),
+            )
+          }
           uploadingImages={uploadingImages}
           imageErrors={imageErrors}
+          fileErrors={fileErrors}
           showFileDropdown={showFileDropdown}
           filteredFiles={filteredFiles}
           selectedFileIndex={selectedFileIndex}
@@ -401,7 +431,8 @@ function ChatInterface({
           frequentCommands={commandQuery ? [] : frequentCommands}
           getRootProps={getRootProps as (...args: unknown[]) => Record<string, unknown>}
           getInputProps={getInputProps as (...args: unknown[]) => Record<string, unknown>}
-          openImagePicker={openImagePicker}
+          selectAttachmentFiles={selectAttachmentFiles}
+          selectImageFiles={selectImageFiles}
           inputHighlightRef={inputHighlightRef}
           renderInputWithMentions={renderInputWithMentions}
           textareaRef={textareaRef}
@@ -413,24 +444,28 @@ function ChatInterface({
           onTextareaScrollSync={syncInputOverlayScroll}
           onTextareaInput={handleTextareaInput}
           onInputFocusChange={handleInputFocusChange}
-          placeholder={t('input.placeholder', {
-            provider:
-              provider === 'cursor'
-                ? t('messageTypes.cursor')
-                : provider === 'codex'
-                  ? t('messageTypes.codex')
-                  : provider === 'gemini'
-                    ? t('messageTypes.gemini')
-                    : provider === 'opencode'
-                      ? t('messageTypes.opencode', { defaultValue: 'OpenCode' })
-                    : t('messageTypes.claude'),
-          })}
+          placeholder={
+            IS_CONSUMER_MODE
+              ? `给${import.meta.env.VITE_PRODUCT_NAME || '智果'}发消息…`
+              : t('input.placeholder', {
+                  provider:
+                    provider === 'cursor'
+                      ? t('messageTypes.cursor')
+                      : provider === 'codex'
+                        ? t('messageTypes.codex')
+                        : provider === 'gemini'
+                          ? t('messageTypes.gemini')
+                          : provider === 'opencode'
+                            ? t('messageTypes.opencode', { defaultValue: 'OpenCode' })
+                            : t('messageTypes.claude'),
+                })
+          }
           isTextareaExpanded={isTextareaExpanded}
           sendByCtrlEnter={sendByCtrlEnter}
         />
       </div>
 
-      <QuickSettingsPanel />
+      {!IS_CONSUMER_MODE && <QuickSettingsPanel />}
 
       <CommandResultModal
         payload={commandModalPayload}

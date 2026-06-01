@@ -8,6 +8,11 @@ import type {
   ProviderModelsCacheInfo,
   ProviderModelsDefinition,
 } from '../../../types/app';
+import {
+  CONSUMER_DEFAULT_CLAUDE_MODEL,
+  IS_CONSUMER_MODE,
+  LOCKED_PROVIDER,
+} from '../../../constants/product';
 
 const FALLBACK_DEFAULT_MODEL: Record<LLMProvider, string> = {
   claude: 'opus',
@@ -55,15 +60,30 @@ type ChangeActiveModelApiResponse = {
 };
 
 export function useChatProviderState({ selectedSession, selectedProject }: UseChatProviderStateArgs) {
-  const [permissionMode, setPermissionMode] = useState<PermissionMode>('default');
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>(
+    IS_CONSUMER_MODE ? 'bypassPermissions' : 'default',
+  );
   const [pendingPermissionRequests, setPendingPermissionRequests] = useState<PendingPermissionRequest[]>([]);
-  const [provider, setProvider] = useState<LLMProvider>(() => {
+  const [provider, setProviderState] = useState<LLMProvider>(() => {
+    if (IS_CONSUMER_MODE) {
+      return LOCKED_PROVIDER;
+    }
     return (localStorage.getItem('selected-provider') as LLMProvider) || 'claude';
   });
+  const setProvider = useCallback((next: LLMProvider) => {
+    if (IS_CONSUMER_MODE) {
+      return;
+    }
+    setProviderState(next);
+    localStorage.setItem('selected-provider', next);
+  }, []);
   const [cursorModel, setCursorModel] = useState<string>(() => {
     return localStorage.getItem('cursor-model') || FALLBACK_DEFAULT_MODEL.cursor;
   });
   const [claudeModel, setClaudeModel] = useState<string>(() => {
+    if (IS_CONSUMER_MODE) {
+      return localStorage.getItem('claude-model') || CONSUMER_DEFAULT_CLAUDE_MODEL;
+    }
     return localStorage.getItem('claude-model') || FALLBACK_DEFAULT_MODEL.claude;
   });
   const [codexModel, setCodexModel] = useState<string>(() => {
@@ -262,6 +282,11 @@ export function useChatProviderState({ selectedSession, selectedProject }: UseCh
   }, [providerModelCatalog.opencode, opencodeModel]);
 
   useEffect(() => {
+    if (IS_CONSUMER_MODE) {
+      setPermissionMode('bypassPermissions');
+      return;
+    }
+
     if (!selectedSession?.id) {
       return;
     }
@@ -272,13 +297,15 @@ export function useChatProviderState({ selectedSession, selectedProject }: UseCh
   }, [selectedSession?.id, provider]);
 
   useEffect(() => {
+    if (IS_CONSUMER_MODE) {
+      return;
+    }
     if (!selectedSession?.__provider || selectedSession.__provider === provider) {
       return;
     }
 
     setProvider(selectedSession.__provider);
-    localStorage.setItem('selected-provider', selectedSession.__provider);
-  }, [provider, selectedSession]);
+  }, [provider, selectedSession, setProvider]);
 
   useEffect(() => {
     if (lastProviderRef.current === provider) {

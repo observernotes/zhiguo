@@ -3,17 +3,47 @@ import bcrypt from 'bcrypt';
 import { userDb } from '../modules/database/index.js';
 import { getConnection } from '../modules/database/connection.js';
 import { generateToken, authenticateToken } from '../middleware/auth.js';
+import { isZhiguoMode, provisionUserWorkspace } from '../services/zhiguo-user-workspace.service.js';
 
 const router = express.Router();
 const db = getConnection();
+
+const validateCredentials = (username, password) => {
+  if (!username || !password) {
+    return 'Username and password are required';
+  }
+  if (username.length < 3 || password.length < 6) {
+    return 'Username must be at least 3 characters, password at least 6 characters';
+  }
+  if (!/^[a-zA-Z0-9_\u4e00-\u9fa5-]+$/.test(username)) {
+    return 'Username may only contain letters, numbers, underscore and Chinese characters';
+  }
+  return null;
+};
+
+async function finalizeUserSession(user, res) {
+  if (isZhiguoMode()) {
+    await provisionUserWorkspace(Number(user.id), user.username);
+  }
+
+  const token = generateToken(user);
+  userDb.updateLastLogin(Number(user.id));
+
+  res.json({
+    success: true,
+    user: { id: user.id, username: user.username },
+    token,
+  });
+}
 
 // Check auth status and setup requirements
 router.get('/status', async (req, res) => {
   try {
     const hasUsers = await userDb.hasUsers();
     res.json({ 
-      needsSetup: !hasUsers,
-      isAuthenticated: false // Will be overridden by frontend if token exists
+      needsSetup: !hasUsers && !isZhiguoMode(),
+      allowSignup: isZhiguoMode(),
+      isAuthenticated: false
     });
   } catch (error) {
     console.error('Auth status error:', error);
@@ -21,55 +51,38 @@ router.get('/status', async (req, res) => {
   }
 });
 
-// User registration (setup) - only allowed if no users exist
+// User registration — single-user in OSS mode; multi-user in 智果 mode
 router.post('/register', async (req, res) => {
   try {
     const { username, password } = req.body;
-    
-    // Validate input
-    if (!username || !password) {
-      return res.status(400).json({ error: 'Username and password are required' });
+    const validationError = validateCredentials(username, password);
+    if (validationError) {
+      return res.status(400).json({ error: validationError });
     }
-    
-    if (username.length < 3 || password.length < 6) {
-      return res.status(400).json({ error: 'Username must be at least 3 characters, password at least 6 characters' });
-    }
-    
-    // Use a transaction to prevent race conditions
+
     db.prepare('BEGIN').run();
     try {
-      // Check if users already exist (only allow one user)
-      const hasUsers = userDb.hasUsers();
-      if (hasUsers) {
+      if (!isZhiguoMode()) {
+        const hasUsers = userDb.hasUsers();
+        if (hasUsers) {
+          db.prepare('ROLLBACK').run();
+          return res.status(403).json({ error: 'User already exists. This is a single-user system.' });
+        }
+      } else if (userDb.getUserByUsername(username)) {
         db.prepare('ROLLBACK').run();
-        return res.status(403).json({ error: 'User already exists. This is a single-user system.' });
+        return res.status(409).json({ error: '用户名已被占用' });
       }
-      
-      // Hash password
+
       const saltRounds = 12;
       const passwordHash = await bcrypt.hash(password, saltRounds);
-      
-      // Create user
       const user = userDb.createUser(username, passwordHash);
-      
-      // Generate token
-      const token = generateToken(user);
-      
+
       db.prepare('COMMIT').run();
-
-      // Update last login (non-fatal, outside transaction)
-      userDb.updateLastLogin(user.id);
-
-      res.json({
-        success: true,
-        user: { id: user.id, username: user.username },
-        token
-      });
+      await finalizeUserSession(user, res);
     } catch (error) {
       db.prepare('ROLLBACK').run();
       throw error;
     }
-    
   } catch (error) {
     console.error('Registration error:', error);
     if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
@@ -104,10 +117,14 @@ router.post('/login', async (req, res) => {
     
     // Generate token
     const token = generateToken(user);
-    
+
+    if (isZhiguoMode()) {
+      await provisionUserWorkspace(user.id, user.username);
+    }
+
     // Update last login
     userDb.updateLastLogin(user.id);
-    
+
     res.json({
       success: true,
       user: { id: user.id, username: user.username },

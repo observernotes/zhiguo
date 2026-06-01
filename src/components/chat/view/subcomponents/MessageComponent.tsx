@@ -1,5 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { IS_CONSUMER_MODE, PRODUCT_NAME, ZHIGUO_MASCOT_SRC } from '../../../../constants/product';
+import { sanitizeConsumerAssistantContent } from '../../../../zhiguo/consumerDisplayPolicy';
 import SessionProviderLogo from '../../../llm-logo-provider/SessionProviderLogo';
 import type {
   ChatMessage,
@@ -44,7 +46,7 @@ type InteractiveOption = {
 type PermissionGrantState = 'idle' | 'granted' | 'error';
 const COPY_HIDDEN_TOOL_NAMES = new Set(['Bash', 'Edit', 'Write', 'ApplyPatch']);
 
-const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, onShowSettings, onGrantToolPermission, autoExpandTools, showRawParameters, showThinking, selectedProject, provider }: MessageComponentProps) => {
+const MessageComponent = ({ message, prevMessage, createDiff, onFileOpen, onShowSettings, onGrantToolPermission, autoExpandTools, showRawParameters, showThinking, selectedProject, provider }: MessageComponentProps) => {
   const { t } = useTranslation('chat');
   const isGrouped = prevMessage && prevMessage.type === message.type &&
     ((prevMessage.type === 'assistant') ||
@@ -56,9 +58,25 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
   const permissionSuggestion = getClaudePermissionSuggestion(message, provider);
   const [permissionGrantState, setPermissionGrantState] = useState<PermissionGrantState>('idle');
   const userCopyContent = String(message.content || '');
-  const formattedMessageContent = useMemo(
-    () => formatUsageLimitText(String(message.content || '')),
-    [message.content]
+  const formattedMessageContent = useMemo(() => {
+    const raw = formatUsageLimitText(String(message.content || ''));
+    if (
+      IS_CONSUMER_MODE &&
+      message.type === 'assistant' &&
+      !message.isToolUse &&
+      !message.isStreaming
+    ) {
+      return sanitizeConsumerAssistantContent(raw);
+    }
+    return raw;
+  }, [message.content, message.type, message.isToolUse, message.isStreaming]);
+  const shouldHideEmptyConsumerAssistant = Boolean(
+    IS_CONSUMER_MODE &&
+    message.type === 'assistant' &&
+    !message.isToolUse &&
+    !message.isThinking &&
+    !message.isStreaming &&
+    !formattedMessageContent.trim()
   );
   const assistantCopyContent = message.isToolUse
     ? String(message.displayText || message.content || '')
@@ -70,7 +88,8 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
   const shouldShowAssistantCopyControl = message.type === 'assistant' &&
     assistantCopyContent.trim().length > 0 &&
     !isCommandOrFileEditToolResponse &&
-    !message.isThinking;
+    !message.isThinking &&
+    !message.isStreaming;
 
 
   useEffect(() => {
@@ -110,16 +129,44 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
     return null;
   }
 
+  if (shouldHideEmptyConsumerAssistant) {
+    return null;
+  }
+
+  if (IS_CONSUMER_MODE && (message.type === 'tool' || message.isToolUse)) {
+    return null;
+  }
+
+  const userBubbleClass = IS_CONSUMER_MODE
+    ? 'group flex-1 rounded-[20px] bg-[#FF7A3D] px-4 py-2.5 text-[15px] leading-6 text-white shadow-sm shadow-orange-200/60 sm:flex-initial'
+    : 'group flex-1 rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-white shadow-sm sm:flex-initial sm:px-4';
+
+  const userMetaClass = IS_CONSUMER_MODE ? 'text-xs text-orange-100' : 'text-xs text-blue-100';
+
+  const userAvatarClass = IS_CONSUMER_MODE
+    ? 'hidden h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-orange-400 text-sm text-white sm:flex'
+    : 'hidden h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-blue-600 text-sm text-white sm:flex';
+
+  const assistantContentClass = IS_CONSUMER_MODE
+    ? 'px-1 py-1 text-[15px] leading-7 text-[#33241B]'
+    : 'text-sm text-gray-700 dark:text-gray-300';
+
+  const assistantMarkdownClass = IS_CONSUMER_MODE
+    ? 'prose prose-stone max-w-none text-[15px] leading-7 prose-p:my-2 prose-headings:mb-2 prose-headings:mt-4 prose-headings:text-[#33241B] prose-strong:text-[#2A1A12] prose-li:my-0.5 prose-ul:my-2 prose-ol:my-2 prose-pre:my-3 prose-pre:rounded-2xl prose-pre:border prose-pre:border-orange-100 prose-pre:bg-[#2B211B] prose-code:text-[#7A3F20] dark:prose-invert'
+    : 'prose prose-sm prose-gray max-w-none dark:prose-invert';
+
+  const consumerPlainTextClass = 'whitespace-pre-wrap break-words text-[15px] leading-7 text-[#33241B]';
+
   return (
     <div
       ref={messageRef}
       data-message-timestamp={message.timestamp || undefined}
-      className={`chat-message ${message.type} ${isGrouped ? 'grouped' : ''} ${message.type === 'user' ? 'flex justify-end px-3 sm:px-0' : 'px-3 sm:px-0'}`}
+      className={`chat-message ${message.type} ${isGrouped ? 'grouped' : ''} ${message.type === 'user' ? 'flex justify-end px-3 sm:px-0' : IS_CONSUMER_MODE ? 'px-3 sm:px-0' : 'px-3 sm:px-0'}`}
     >
       {message.type === 'user' ? (
         /* User message bubble on the right */
-        <div className="flex w-full items-end space-x-0 sm:w-auto sm:max-w-[85%] sm:space-x-3 md:max-w-md lg:max-w-lg xl:max-w-xl">
-          <div className="group flex-1 rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-white shadow-sm sm:flex-initial sm:px-4">
+        <div className="flex w-full items-end space-x-0 sm:w-auto sm:max-w-[82%] sm:space-x-3 md:max-w-md lg:max-w-lg xl:max-w-xl">
+          <div className={userBubbleClass}>
             <div className="whitespace-pre-wrap break-words text-sm">
               {message.content}
             </div>
@@ -136,15 +183,17 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
                 ))}
               </div>
             )}
-            <div className="mt-1 flex items-center justify-end gap-1 text-xs text-blue-100">
-              {shouldShowUserCopyControl && (
-                <MessageCopyControl content={userCopyContent} messageType="user" />
-              )}
-              <span>{formattedTime}</span>
-            </div>
+            {!IS_CONSUMER_MODE && (
+              <div className={`mt-1 flex items-center justify-end gap-1 ${userMetaClass}`}>
+                {shouldShowUserCopyControl && (
+                  <MessageCopyControl content={userCopyContent} messageType="user" />
+                )}
+                <span>{formattedTime}</span>
+              </div>
+            )}
           </div>
           {!isGrouped && (
-            <div className="hidden h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-blue-600 text-sm text-white sm:flex">
+            <div className={userAvatarClass}>
               U
             </div>
           )}
@@ -159,9 +208,9 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
         </div>
       ) : (
         /* Claude/Error/Tool messages on the left */
-        <div className="w-full">
-          {!isGrouped && (
-            <div className="mb-2 flex items-center space-x-3">
+        <div className={IS_CONSUMER_MODE ? 'mx-auto w-full max-w-3xl' : 'w-full'}>
+          {!isGrouped && !IS_CONSUMER_MODE && (
+            <div className={`mb-2 flex items-center ${IS_CONSUMER_MODE ? 'space-x-2.5' : 'space-x-3'}`}>
               {message.type === 'error' ? (
                 <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-red-600 text-sm text-white">
                   !
@@ -171,29 +220,35 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
                   🔧
                 </div>
               ) : (
-                <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full p-1 text-sm text-white">
-                  <SessionProviderLogo provider={provider} className="h-full w-full" />
+                <div className={`${IS_CONSUMER_MODE ? 'h-10 w-10 rounded-2xl bg-white shadow-sm shadow-orange-100 ring-1' : 'h-9 w-9 rounded-full bg-orange-50 ring-2'} flex flex-shrink-0 items-center justify-center overflow-hidden ring-orange-100`}>
+                  {IS_CONSUMER_MODE ? (
+                    <img src={ZHIGUO_MASCOT_SRC} alt={PRODUCT_NAME} className="h-full w-full object-cover" />
+                  ) : (
+                    <SessionProviderLogo provider={provider} className="h-full w-full" />
+                  )}
                 </div>
               )}
-              <div className="text-sm font-medium text-gray-900 dark:text-white">
+              <div className={`text-sm font-medium ${IS_CONSUMER_MODE ? 'text-[#5A3A2A]' : 'text-gray-900 dark:text-white'}`}>
                 {message.type === 'error'
                   ? t('messageTypes.error')
                   : message.type === 'tool'
                     ? t('messageTypes.tool')
-                    : (provider === 'cursor'
-                        ? t('messageTypes.cursor')
-                        : provider === 'codex'
-                          ? t('messageTypes.codex')
-                          : provider === 'gemini'
-                            ? t('messageTypes.gemini')
-                            : provider === 'opencode'
-                              ? t('messageTypes.opencode', { defaultValue: 'OpenCode' })
-                              : t('messageTypes.claude'))}
+                    : IS_CONSUMER_MODE
+                      ? PRODUCT_NAME
+                      : (provider === 'cursor'
+                          ? t('messageTypes.cursor')
+                          : provider === 'codex'
+                            ? t('messageTypes.codex')
+                            : provider === 'gemini'
+                              ? t('messageTypes.gemini')
+                              : provider === 'opencode'
+                                ? t('messageTypes.opencode', { defaultValue: 'OpenCode' })
+                                : t('messageTypes.claude'))}
               </div>
             </div>
           )}
 
-          <div className="w-full">
+          <div className={IS_CONSUMER_MODE ? 'w-full' : 'w-full'}>
 
             {message.isToolUse ? (
               <>
@@ -405,7 +460,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
                 </ReasoningContent>
               </Reasoning>
             ) : (
-              <div className="text-sm text-gray-700 dark:text-gray-300">
+              <div className={assistantContentClass}>
                 {/* Reasoning accordion */}
                 {showThinking && message.reasoning && (
                   <Reasoning className="mb-3" defaultOpen={false}>
@@ -453,9 +508,50 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
 
                   // Normal rendering for non-JSON content
                   return message.type === 'assistant' ? (
-                    <Markdown className="prose prose-sm prose-gray max-w-none dark:prose-invert">
-                      {content}
-                    </Markdown>
+                    <>
+                      {IS_CONSUMER_MODE && message.isStreaming ? (
+                        <div className={consumerPlainTextClass}>
+                          {content}
+                          {!content.trim() ? (
+                            <span className="inline-flex gap-0.5 align-middle">
+                              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-[#FF6B35]/70 [animation-delay:0ms]" />
+                              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-[#FF6B35]/70 [animation-delay:150ms]" />
+                              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-[#FF6B35]/70 [animation-delay:300ms]" />
+                            </span>
+                          ) : (
+                            <span
+                              aria-hidden
+                              className="ml-0.5 inline-block h-[1em] w-0.5 animate-pulse bg-[#FF6B35] align-[-0.1em]"
+                            />
+                          )}
+                        </div>
+                      ) : message.isStreaming ? (
+                        <div className={`${assistantMarkdownClass} whitespace-pre-wrap break-words leading-relaxed`}>
+                          {content}
+                          <span
+                            aria-hidden
+                            className="ml-0.5 inline-block h-[1em] w-0.5 animate-pulse bg-[#FF6B35] align-[-0.1em]"
+                          />
+                        </div>
+                      ) : (
+                        <Markdown className={assistantMarkdownClass}>
+                          {content}
+                        </Markdown>
+                      )}
+                      {message.images && message.images.length > 0 && (
+                        <div className="mt-3 grid grid-cols-1 gap-2">
+                          {message.images.map((img, idx) => (
+                            <img
+                              key={img.name || idx}
+                              src={img.data}
+                              alt={img.name}
+                              className="max-h-[min(70vh,480px)] w-auto max-w-full cursor-pointer rounded-2xl shadow-md shadow-orange-100/80"
+                              onClick={() => window.open(img.data, '_blank')}
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </>
                   ) : (
                     <div className="whitespace-pre-wrap">
                       {content}
@@ -465,8 +561,8 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
               </div>
             )}
 
-            {(shouldShowAssistantCopyControl || !isGrouped) && (
-              <div className="mt-1 flex w-full items-center gap-2 text-[11px] text-gray-400 dark:text-gray-500">
+            {!IS_CONSUMER_MODE && (shouldShowAssistantCopyControl || !isGrouped) && (
+              <div className={`mt-1 flex w-full items-center gap-2 text-[11px] ${IS_CONSUMER_MODE ? 'px-2 text-[#B0846D]' : 'text-gray-400 dark:text-gray-500'}`}>
                 {shouldShowAssistantCopyControl && (
                   <MessageCopyControl content={assistantCopyContent} messageType="assistant" />
                 )}
@@ -478,7 +574,38 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
       )}
     </div>
   );
-});
+}
 
-export default MessageComponent;
+function messageRenderKey(message: ChatMessage): string {
+  return [
+    message.type,
+    String(message.id || ''),
+    String(message.toolId || ''),
+    String(message.timestamp || ''),
+    message.isStreaming ? 'stream' : '',
+    message.isToolUse ? 'tool' : '',
+  ].join(':');
+}
+
+function areMessagePropsEqual(prev: MessageComponentProps, next: MessageComponentProps): boolean {
+  if (prev.message.isStreaming || next.message.isStreaming) {
+    return (
+      prev.message.content === next.message.content
+      && prev.message.isStreaming === next.message.isStreaming
+      && messageRenderKey(prev.message) === messageRenderKey(next.message)
+      && prev.provider === next.provider
+    );
+  }
+
+  return (
+    prev.message === next.message
+    && prev.prevMessage === next.prevMessage
+    && prev.provider === next.provider
+    && prev.autoExpandTools === next.autoExpandTools
+    && prev.showRawParameters === next.showRawParameters
+    && prev.showThinking === next.showThinking
+  );
+}
+
+export default memo(MessageComponent, areMessagePropsEqual);
 

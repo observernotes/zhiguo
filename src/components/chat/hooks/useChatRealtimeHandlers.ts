@@ -1,7 +1,9 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 
 import { usePaletteOps } from '../../../contexts/PaletteOpsContext';
+import { useWebSocket } from '../../../contexts/WebSocketContext';
+import { isPendingSessionId } from '../../../utils/pendingSession';
 import type { PendingPermissionRequest, SessionNavigationOptions } from '../types/types';
 import type { ProjectSession, LLMProvider } from '../../../types/app';
 import type { SessionStore, NormalizedMessage } from '../../../stores/useSessionStore';
@@ -97,7 +99,65 @@ export function useChatRealtimeHandlers({
   sessionStore,
 }: UseChatRealtimeHandlersArgs) {
   const paletteOps = usePaletteOps();
+  const { subscribeRealtime } = useWebSocket();
   const lastProcessedMessageRef = useRef<LatestChatMessage | null>(null);
+  const providerRef = useRef(provider);
+  const selectedSessionRef = useRef(selectedSession);
+  const currentSessionIdRef = useRef(currentSessionId);
+
+  providerRef.current = provider;
+  selectedSessionRef.current = selectedSession;
+  currentSessionIdRef.current = currentSessionId;
+
+  const flushStreamingToStore = useCallback((sessionId: string) => {
+    sessionStore.updateStreaming(sessionId, accumulatedStreamRef.current, providerRef.current);
+  }, [sessionStore]);
+
+  const handleStreamFrame = useCallback((msg: LatestChatMessage) => {
+    if (msg.kind !== 'stream_delta' && msg.kind !== 'stream_end') {
+      return;
+    }
+
+    const activeViewSessionId =
+      selectedSessionRef.current?.id || currentSessionIdRef.current || null;
+    const sid = msg.sessionId || activeViewSessionId;
+    if (!sid) {
+      return;
+    }
+
+    if (msg.kind === 'stream_delta') {
+      const text = msg.content || '';
+      if (!text) {
+        return;
+      }
+      accumulatedStreamRef.current += text;
+
+      if (sid !== activeViewSessionId) {
+        sessionStore.appendRealtime(sid, msg as NormalizedMessage);
+        return;
+      }
+
+      if (!streamTimerRef.current) {
+        streamTimerRef.current = requestAnimationFrame(() => {
+          streamTimerRef.current = null;
+          flushStreamingToStore(sid);
+        });
+      }
+      return;
+    }
+
+    if (streamTimerRef.current) {
+      cancelAnimationFrame(streamTimerRef.current);
+      streamTimerRef.current = null;
+    }
+    if (accumulatedStreamRef.current) {
+      flushStreamingToStore(sid);
+    }
+    sessionStore.finalizeStreaming(sid);
+    accumulatedStreamRef.current = '';
+  }, [flushStreamingToStore, sessionStore, streamTimerRef]);
+
+  useEffect(() => subscribeRealtime(handleStreamFrame), [handleStreamFrame, subscribeRealtime]);
 
   useEffect(() => {
     if (!latestMessage) return;
@@ -180,38 +240,8 @@ export function useChatRealtimeHandlers({
 
     const sid = msg.sessionId || activeViewSessionId;
 
-    // --- Streaming: buffer for performance ---
-    if (msg.kind === 'stream_delta') {
-      const text = msg.content || '';
-      if (!text) return;
-      accumulatedStreamRef.current += text;
-      if (!streamTimerRef.current) {
-        streamTimerRef.current = window.setTimeout(() => {
-          streamTimerRef.current = null;
-          if (sid) {
-            sessionStore.updateStreaming(sid, accumulatedStreamRef.current, provider);
-          }
-        }, 100);
-      }
-      // Also route to store for non-active sessions
-      if (sid && sid !== activeViewSessionId) {
-        sessionStore.appendRealtime(sid, msg as NormalizedMessage);
-      }
-      return;
-    }
-
-    if (msg.kind === 'stream_end') {
-      if (streamTimerRef.current) {
-        clearTimeout(streamTimerRef.current);
-        streamTimerRef.current = null;
-      }
-      if (sid) {
-        if (accumulatedStreamRef.current) {
-          sessionStore.updateStreaming(sid, accumulatedStreamRef.current, provider);
-        }
-        sessionStore.finalizeStreaming(sid);
-      }
-      accumulatedStreamRef.current = '';
+    // stream_delta / stream_end are handled synchronously via subscribeRealtime
+    if (msg.kind === 'stream_delta' || msg.kind === 'stream_end') {
       return;
     }
 
@@ -232,6 +262,33 @@ export function useChatRealtimeHandlers({
       case 'session_created': {
         const newSessionId = msg.newSessionId;
         if (!newSessionId) break;
+
+        const pendingSessionId =
+          (currentSessionId && isPendingSessionId(currentSessionId) && currentSessionId)
+          || (selectedSession?.id && isPendingSessionId(String(selectedSession.id)) && String(selectedSession.id))
+          || null;
+
+        if (pendingSessionId) {
+          paletteOps.promoteOptimisticSession?.(pendingSessionId, newSessionId);
+          sessionStore.replaceSessionId(pendingSessionId, newSessionId);
+          setCurrentSessionId(newSessionId);
+          setPendingPermissionRequests((prev) =>
+            prev.map((r) => (r.sessionId === pendingSessionId ? { ...r, sessionId: newSessionId } : r)),
+          );
+          pendingViewSessionRef.current = null;
+          onSessionActive?.(newSessionId);
+          onSessionProcessing?.(newSessionId);
+          setIsLoading(true);
+          setCanAbortSession(true);
+          setClaudeStatus({
+            text: 'Processing',
+            tokens: 0,
+            can_interrupt: true,
+          });
+          onNavigateToSession?.(newSessionId, { replace: true });
+          void paletteOps.refreshProjects();
+          break;
+        }
 
         // We no longer synthesize client-side placeholder IDs. Until the provider
         // announces `session_created`, the active id is expected to be null.
@@ -254,17 +311,18 @@ export function useChatRealtimeHandlers({
           can_interrupt: true,
         });
         onNavigateToSession?.(newSessionId);
+        void paletteOps.refreshProjects();
         break;
       }
 
       case 'complete': {
         // Flush any remaining streaming state
         if (streamTimerRef.current) {
-          clearTimeout(streamTimerRef.current);
+          cancelAnimationFrame(streamTimerRef.current);
           streamTimerRef.current = null;
         }
         if (sid && accumulatedStreamRef.current) {
-          sessionStore.updateStreaming(sid, accumulatedStreamRef.current, provider);
+          flushStreamingToStore(sid);
           sessionStore.finalizeStreaming(sid);
         }
         accumulatedStreamRef.current = '';
@@ -313,6 +371,14 @@ export function useChatRealtimeHandlers({
       }
 
       case 'error': {
+        if (streamTimerRef.current) {
+          cancelAnimationFrame(streamTimerRef.current);
+          streamTimerRef.current = null;
+        }
+        accumulatedStreamRef.current = '';
+        if (sid) {
+          sessionStore.clearLiveStream(sid);
+        }
         setIsLoading(false);
         setCanAbortSession(false);
         setClaudeStatus(null);
@@ -382,6 +448,7 @@ export function useChatRealtimeHandlers({
     pendingViewSessionRef,
     streamTimerRef,
     accumulatedStreamRef,
+    flushStreamingToStore,
     onSessionInactive,
     onSessionActive,
     onSessionProcessing,
