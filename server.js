@@ -21,9 +21,14 @@ const PORT = Number(process.env.PORT || 3300);
 const COOKIE_NAME = "ccb_session";
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 14;
 const MAX_BODY_BYTES = 1024 * 1024;
+const POST_TOOL_IDLE_TIMEOUT_MS = Math.max(15000, Number(process.env.POST_TOOL_IDLE_TIMEOUT_MS || 45000) || 45000);
+const PASEO_HOME = process.env.PASEO_HOME || path.join(DATA_DIR, "paseo");
+const PASEO_LISTEN = process.env.PASEO_LISTEN || "127.0.0.1:6767";
 
 const jobs = new Map();
 const sseClients = new Map();
+let paseoBridge = null;
+let paseoRuntime = null;
 
 function nowIso() {
   return new Date().toISOString();
@@ -169,8 +174,15 @@ function parseCookies(header) {
   return out;
 }
 
+function cookieSecureEnabled() {
+  if (process.env.COOKIE_SECURE === "1") return true;
+  if (process.env.COOKIE_SECURE === "0") return false;
+  const publicUrl = String(process.env.ZHIGUO_PUBLIC_URL || "").trim();
+  return publicUrl.startsWith("https://");
+}
+
 function setCookie(res, token) {
-  const secure = process.env.COOKIE_SECURE === "1" ? "; Secure" : "";
+  const secure = cookieSecureEnabled() ? "; Secure" : "";
   res.setHeader(
     "Set-Cookie",
     `${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${
@@ -205,7 +217,7 @@ async function readSettings(username) {
     defaultModel: "",
     maxTurns: "",
     appendSystemPrompt:
-      "You are running inside Zhiguo, a local web product. Keep users informed about code actions, files changed, and verification steps.",
+      "You are running inside Zhiguo, a local web product. Preserve user-provided filenames, paths, numbers, and quoted strings exactly when using file tools. After writing or editing files, verify the exact requested path and content, then keep users informed about code actions, files changed, and verification steps.",
   };
   const stored = await readJson(settingsPath(username), {});
   return { ...defaults, ...stored };
@@ -213,7 +225,13 @@ async function readSettings(username) {
 
 async function writeSettings(username, patch) {
   const current = await readSettings(username);
-  const next = {
+  const next = mergeSettingsPatch(current, patch);
+  await writeJsonAtomic(settingsPath(username), next);
+  return next;
+}
+
+function mergeSettingsPatch(current, patch = {}) {
+  return {
     ...current,
     claudePath: cleanString(patch.claudePath, current.claudePath),
     defaultMode: cleanMode(patch.defaultMode, current.defaultMode),
@@ -221,8 +239,6 @@ async function writeSettings(username, patch) {
     maxTurns: cleanPositiveIntString(patch.maxTurns, current.maxTurns || ""),
     appendSystemPrompt: cleanString(patch.appendSystemPrompt, current.appendSystemPrompt || ""),
   };
-  await writeJsonAtomic(settingsPath(username), next);
-  return next;
 }
 
 function cleanString(value, fallback) {
@@ -242,16 +258,17 @@ function cleanMode(value, fallback = "plan") {
   return allowed.has(value) ? value : fallback;
 }
 
-async function listSessions(username) {
+async function listSessions(username, options = {}) {
   await ensureUserFolders(username);
   const dir = sessionsDir(username);
   const files = await fsp.readdir(dir).catch(() => []);
   const sessions = [];
+  const archived = options.archived === true;
   for (const file of files) {
     if (!file.endsWith(".json")) continue;
     const raw = await readJson(path.join(dir, file), null).catch(() => null);
     const session = raw ? await recoverOrphanedSession(username, normalizeSession(raw, username)) : null;
-    if (session && !session.archivedAt) sessions.push(projectSession(session));
+    if (session && Boolean(session.archivedAt) === archived) sessions.push(projectSession(session));
   }
   sessions.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   return sessions;
@@ -299,6 +316,7 @@ async function recoverOrphanedSession(username, session) {
 }
 
 function hasLiveJob(username, sessionId) {
+  if (paseoBridge?.hasLiveJob?.(username, sessionId)) return true;
   const job = jobs.get(jobKey(username, sessionId));
   return Boolean(job && job.child && job.child.exitCode === null && !job.child.killed && !job.closed);
 }
@@ -314,6 +332,7 @@ function normalizeSession(session, username) {
     model: session.model || "",
     claudeSessionId: session.claudeSessionId || session.id,
     claudeSessionStarted: Boolean(session.claudeSessionStarted || hasCompletedClaudeTurn(session)),
+    paseoAgentId: session.paseoAgentId || null,
     cwd: session.cwd || userDir(username),
     messages: Array.isArray(session.messages) ? session.messages : [],
     usage: session.usage || null,
@@ -323,7 +342,7 @@ function normalizeSession(session, username) {
 }
 
 function projectSession(session) {
-  const last = [...(session.messages || [])].reverse().find(isPreviewableItem);
+  const turnCount = sessionTurnCount(session);
   return {
     id: session.id,
     title: session.title || "新对话",
@@ -332,11 +351,52 @@ function projectSession(session) {
     status: session.status || "idle",
     mode: session.mode || "plan",
     model: session.model || "",
-    preview: last ? summarizeTimelineItem(last) : "",
+    archivedAt: session.archivedAt || null,
+    lastError: session.lastError || "",
+    turnCount,
+    preview: sessionPreview(session),
   };
 }
 
+function sessionPreview(session) {
+  const messages = session.messages || [];
+  const last = [...messages].reverse().find(isPreviewableItem);
+  const preview = last ? summarizeTimelineItem(last) : "";
+  if (shouldUseLatestUserPreview(preview)) return latestUserPreview(messages) || preview;
+  return preview;
+}
+
+function sessionTurnCount(session) {
+  return (session.messages || []).filter((item) => item?.type === "user").length;
+}
+
+function shouldUseLatestUserPreview(value = "") {
+  const text = String(value || "").replace(/\s+/g, "");
+  if (!text) return true;
+  return (
+    text.length <= 8 ||
+    /额度不足|未连接|没有找到本机助手|回复没有完成|这次回复没有完成|已停止生成|已取消本次请求|Localengine|APIError|InsufficientBalance/i.test(
+      text,
+    )
+  );
+}
+
+function latestUserPreview(messages = []) {
+  const latestUser = [...messages].reverse().find((item) => item?.type === "user" && item.text);
+  return latestUser ? summarizeUserPrompt(latestUser.text) : "";
+}
+
+function summarizeUserPrompt(value = "") {
+  const text = naturalSummary(value)
+    .replace(/^第?[一二三四五六七八九十\d]+轮[：:]\s*/u, "")
+    .replace(/^第?[一二三四五六七八九十\d]+问[：:]\s*/u, "")
+    .replace(/^请(?:你)?/, "")
+    .trim();
+  return text.length > 80 ? `${text.slice(0, 80)}...` : text;
+}
+
 function isPreviewableItem(item) {
+  if (item?.type === "assistant" && item.status === "canceled") return false;
   return item && item.type !== "meta" && item.type !== "thinking";
 }
 
@@ -352,7 +412,10 @@ function hasCompletedClaudeTurn(session) {
 }
 
 function summarizeTimelineItem(item) {
-  if (item.type === "user" || item.type === "assistant") return naturalSummary(item.text || "");
+  if (item.type === "user") return naturalSummary(item.text || "");
+  if (item.type === "assistant") {
+    return naturalSummary(item.status === "error" ? userFacingRuntimeMessage(item.text || "") : item.text || "");
+  }
   if (item.type === "tool") {
     const text = item.summary || item.displayName || item.name || "完成了一项操作";
     return naturalSummary(text);
@@ -377,7 +440,8 @@ function naturalSummary(value) {
 function userFacingRuntimeMessage(value) {
   const message = String(value || "").trim();
   if (!message) return "这次回复没有完成，请稍后再试。";
-  if (/exited with code 143|SIGTERM|SIGKILL|Stopped by user/i.test(message)) return "已停止生成";
+  if (/exited with code 143|SIGTERM|SIGKILL|Stopped by user/i.test(message)) return "已取消本次请求";
+  if (/API Error:\s*402|Insufficient Balance/i.test(message)) return "本机助手额度不足，请检查 Claude 账号额度后重试。";
   if (/executable was not found|ENOENT/i.test(message)) return "没有找到本机助手，请在设置里检查连接。";
   return message.length > 220 ? `${message.slice(0, 220)}...` : message;
 }
@@ -462,13 +526,15 @@ async function runClaudeTurn(username, sessionId, input) {
   const settings = await readSettings(username);
   const mode = cleanMode(input.mode, session.mode || settings.defaultMode);
   const model = cleanString(input.model, session.model || settings.defaultModel);
-  const resumeClaudeSession = Boolean(session.claudeSessionStarted && session.claudeSessionId);
   session.mode = mode;
   session.model = model;
   session.status = "running";
   session.lastError = null;
 
+  const existingTurns = sessionTurnCount(session);
   if (session.title === "New chat" || session.title === "新对话") {
+    session.title = titleFromText(text);
+  } else if (shouldRefineAutoTitle(session.title, text, existingTurns)) {
     session.title = titleFromText(text);
   }
 
@@ -490,81 +556,62 @@ async function runClaudeTurn(username, sessionId, input) {
     id: makeId(),
     type: "meta",
     label: "智果本机引擎已启动",
-    detail: `mode=${mode}${model ? ` model=${model}` : ""}`,
+    detail: `paseo/claude mode=${mode}${model ? ` model=${model}` : ""}`,
     createdAt: nowIso(),
   };
   session.messages.push(userMessage, assistantMessage, runMeta);
   await saveSession(username, session);
 
-  const args = buildClaudeArgs({ session, settings, text, mode, model, resumeClaudeSession });
-  const executable = executableForCommand(settings.claudePath || "claude");
-  const child = spawn(executable, args, {
-    cwd: session.cwd,
-    env: envForExecutable(executable),
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  if (!paseoBridge) {
+    const error = new Error("Paseo runtime is not ready.");
+    error.status = 503;
+    throw error;
+  }
 
-  const job = {
-    child,
+  await paseoBridge.runTurn({
     username,
     sessionId,
+    session,
     assistantId: assistantMessage.id,
-    stderr: "",
-    stdoutRemainder: "",
-    lineQueue: Promise.resolve(),
-  };
-  jobs.set(key, job);
-
-  child.stdout.on("data", (chunk) => {
-    job.stdoutRemainder += chunk.toString("utf8");
-    let index;
-    while ((index = job.stdoutRemainder.indexOf("\n")) >= 0) {
-      const line = job.stdoutRemainder.slice(0, index).trim();
-      job.stdoutRemainder = job.stdoutRemainder.slice(index + 1);
-      if (line) {
-        queueClaudeLine(job, line);
-      }
-    }
-  });
-
-  child.stderr.on("data", (chunk) => {
-    job.stderr += chunk.toString("utf8");
-    if (job.stderr.length > 8000) job.stderr = job.stderr.slice(-8000);
-    broadcast(username, sessionId, "stderr", { text: job.stderr.slice(-1200) });
-  });
-
-  child.on("error", (error) => {
-    void finishClaudeTurn(username, sessionId, assistantMessage.id, {
-      ok: false,
-      message:
-        error.code === "ENOENT"
-          ? `Local engine executable was not found: ${settings.claudePath || "claude"}`
-          : error.message,
-    });
-  });
-
-  child.on("close", (code, signal) => {
-    const remainder = job.stdoutRemainder.trim();
-    if (remainder) {
-      queueClaudeLine(job, remainder);
-    }
-    job.closed = true;
-    if (job.userStopped) return;
-    const stderr = job.stderr.trim();
-    const ok = code === 0;
-    void settleJobLineQueue(job).then(() =>
-      finishClaudeTurn(username, sessionId, assistantMessage.id, {
-        ok,
-        message: ok
-          ? ""
-          : userFacingRuntimeMessage(
-              stderr || `Local engine exited with code ${code}${signal ? ` (${signal})` : ""}.`,
-            ),
-      }),
-    );
+    text,
+    mode,
+    model,
+    settings,
+    persist: async (nextSession) => saveSession(username, nextSession),
   });
 
   return session;
+}
+
+async function guardPostToolIdle(job) {
+  if (!job || job.closed || job.userStopped || job.postToolIdleTimeout) return;
+  if (Date.now() - Number(job.lastOutputAt || 0) < POST_TOOL_IDLE_TIMEOUT_MS) return;
+  const session = await readSession(job.username, job.sessionId).catch(() => null);
+  if (!session || session.status !== "running") return;
+  const latestUserIndex = findLastIndex(session.messages || [], (item) => item?.type === "user");
+  const latestItems = latestUserIndex >= 0 ? session.messages.slice(latestUserIndex + 1) : session.messages || [];
+  const assistant = session.messages.find((item) => item.id === job.assistantId);
+  const completedTool = latestItems.some(
+    (item) =>
+      item?.type === "tool" &&
+      (item.status === "done" || item.status === "completed" || item.status === "error" || item.status === "failed"),
+  );
+  const runningTool = latestItems.some((item) => item?.type === "tool" && (item.status === "running" || item.status === "streaming"));
+  if (!assistant || assistant.status !== "streaming" || !completedTool || runningTool) return;
+  job.postToolIdleTimeout = true;
+  await appendMeta(job.username, job.sessionId, "工具结果已返回", "本机助手长时间没有继续输出，已自动结束本轮。");
+  job.child.kill("SIGTERM");
+  job.forceKillTimer = setTimeout(() => {
+    if (!job.closed) job.child.kill("SIGKILL");
+  }, 5000);
+  job.forceKillTimer.unref?.();
+}
+
+function findLastIndex(items, predicate) {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (predicate(items[index], index)) return index;
+  }
+  return -1;
 }
 
 function queueClaudeLine(job, line) {
@@ -605,7 +652,12 @@ function buildClaudeArgs({ session, settings, text, mode, model, resumeClaudeSes
   } else {
     args.push("--session-id", session.claudeSessionId || session.id);
   }
-  if (model) args.push("--model", model);
+  const resolvedModel =
+    model ||
+    readClaudeHarnessEnv().ANTHROPIC_DEFAULT_SONNET_MODEL ||
+    readClaudeHarnessEnv().ANTHROPIC_DEFAULT_OPUS_MODEL ||
+    "";
+  if (resolvedModel) args.push("--model", resolvedModel);
   if (settings.maxTurns) args.push("--max-turns", settings.maxTurns);
   if (settings.appendSystemPrompt) {
     args.push("--append-system-prompt", settings.appendSystemPrompt);
@@ -625,11 +677,89 @@ function titleSeedFromText(text) {
     .replace(/`([^`]+)`/g, "$1")
     .replace(/\s+/g, " ")
     .trim();
-  const namedTask = compact.match(/^([^：:]{2,18})[：:]\s*(?:请|只|帮|用|给|上一轮|不要|第一|第二|第三)/);
-  if (namedTask?.[1]) return namedTask[1].trim();
-  if (/请用\s*Bash/i.test(compact) && /pwd|当前目录/.test(compact)) return "查看当前目录";
-  if (/sleep\s+\d+/.test(compact)) return "运行计时任务";
+  const namedTask = compact.match(/^([^：:]{2,18})[：:]\s*(.+)$/);
+  if (namedTask?.[1] && startsWithTaskCue(namedTask[2])) {
+    const label = namedTask[1].trim();
+    const rest = namedTask[2].trim();
+    if (!isLowSignalTitleLabel(label)) return label;
+    return titleIntentFromText(rest) || titleToolIntentFromText(rest) || rest;
+  }
+  const toolIntent = titleToolIntentFromText(compact);
+  if (toolIntent) return toolIntent;
+  const intent = titleIntentFromText(compact);
+  if (intent) return intent;
   return compact;
+}
+
+function titleToolIntentFromText(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (/sleep\s+\d+/i.test(text)) return "运行计时任务";
+  if (/请用\s*Bash/i.test(text) && /pwd|当前目录/.test(text)) return "查看当前目录";
+
+  const writeFile = titleFileMatch(text, [
+    /(?:Write\s*工具.*?创建文件|写入文件|创建文件)\s+([A-Za-z0-9._/-]+)/i,
+  ]);
+  if (writeFile) return `创建文件 ${shortTitleFile(writeFile)}`;
+
+  const readFile = titleFileMatch(text, [
+    /(?:Read\s*工具读取|读取文件|读取)\s+([A-Za-z0-9._/-]+)/i,
+  ]);
+  if (readFile) return `读取文件 ${shortTitleFile(readFile)}`;
+
+  const editFile = titleFileMatch(text, [
+    /(?:Edit\s*工具把|修改文件|把)\s+([A-Za-z0-9._/-]+)/i,
+  ]);
+  if (editFile) return `修改文件 ${shortTitleFile(editFile)}`;
+
+  if (/请用\s*Bash|Bash\s*运行/i.test(text)) return "运行本机命令";
+  if (/Markdown/i.test(text) && /回复|输出|代码块|列表|标题/.test(text)) return "生成 Markdown 内容";
+  return "";
+}
+
+function titleFileMatch(text, patterns) {
+  for (const pattern of patterns) {
+    const match = String(text || "").match(pattern);
+    const value = match?.[1]?.replace(/[。！？!?，,；;：:]+$/g, "").trim();
+    if (value) return value;
+  }
+  return "";
+}
+
+function shortTitleFile(value = "") {
+  const fileName = path.basename(String(value || "").trim());
+  return fileName.length > 18 ? `${fileName.slice(0, 18)}...` : fileName;
+}
+
+function startsWithTaskCue(value = "") {
+  return /^(请|只|帮|用|给|上一轮|不要|第一|第二|第三|第\d+)/.test(String(value).trim());
+}
+
+function isLowSignalTitleLabel(value = "") {
+  return /^(第?[一二三四五六七八九十\d]+轮|第?[一二三四五六七八九十\d]+步|第?[一二三四五六七八九十\d]+问|第?[一二三四五六七八九十\d]+个问题)$/u.test(
+    String(value).trim(),
+  );
+}
+
+function titleIntentFromText(value = "") {
+  const text = String(value || "").trim();
+  if (/(上一轮|上轮|前面|刚才)/.test(text) && /(要求|回复|回答|记得|记住|哪|什么)/.test(text)) {
+    return "上下文记忆测试";
+  }
+  const reply = text.match(/(?:请)?只?回复(?:[一二三四五六七八九十\d]+个字|两个字|一句话)?[：:]\s*([^，。；;,.!?！？\s]+)/u);
+  if (reply?.[1]) {
+    if (/两个字|[二2]个字/.test(text)) return "两字回复测试";
+    if (/一句话/.test(text)) return "一句话回复测试";
+    return "简短回复测试";
+  }
+  return "";
+}
+
+function shouldRefineAutoTitle(currentTitle = "", text = "", existingTurns = 0) {
+  if (existingTurns < 1) return false;
+  const title = String(currentTitle || "").trim();
+  if (!/^(回复.+|简短回复测试|两字回复测试|一句话回复测试)$/u.test(title)) return false;
+  return titleFromText(text) === "上下文记忆测试";
 }
 
 async function ingestClaudeLine(username, sessionId, assistantId, line) {
@@ -643,6 +773,7 @@ async function ingestClaudeLine(username, sessionId, assistantId, line) {
 
   const session = await readSession(username, sessionId);
   if (!session) return;
+  if (session.status !== "running") return;
   if (event.session_id || event.sessionId) {
     session.claudeSessionId = event.session_id || event.sessionId;
   }
@@ -665,7 +796,7 @@ async function ingestClaudeLine(username, sessionId, assistantId, line) {
     const parts = extractContentParts(event.message || event);
     for (const part of parts) {
       if (part.kind === "tool_result") {
-        completeTool(session, part);
+        await completeTool(session, part);
       }
     }
   } else if (event.type === "system") {
@@ -812,7 +943,7 @@ function upsertTool(session, part) {
     return;
   }
   const detail = buildToolDetail(part.name, part.input, part.output);
-  const display = buildToolDisplay(part.name, detail, part.input);
+  const display = buildToolDisplay(part.name, detail, part.input, "running");
   let item = session.messages.find((entry) => entry.type === "tool" && entry.toolUseId === part.id);
   if (!item) {
     const emptyAssistant = takeTrailingEmptyAssistant(session);
@@ -835,10 +966,10 @@ function upsertTool(session, part) {
     item.name = part.name || item.name;
     item.input = part.input || item.input;
     item.detail = buildToolDetail(item.name, item.input, item.output);
-    const nextDisplay = buildToolDisplay(item.name, item.detail, item.input);
+    if (item.status !== "done" && item.status !== "error") item.status = "running";
+    const nextDisplay = buildToolDisplay(item.name, item.detail, item.input, item.status);
     item.displayName = nextDisplay.displayName;
     item.summary = nextDisplay.summary;
-    if (item.status !== "done" && item.status !== "error") item.status = "running";
   }
 }
 
@@ -851,12 +982,13 @@ function takeTrailingEmptyAssistant(session) {
   return assistant || null;
 }
 
-function completeTool(session, part) {
+async function completeTool(session, part) {
   const item = session.messages.find((entry) => entry.type === "tool" && entry.toolUseId === part.id);
   if (!item) {
     const detail = buildToolDetail("tool", null, part.output);
-    const display = buildToolDisplay("tool", detail, null);
-    session.messages.push({
+    const status = toolCompletionStatus("tool", detail, part);
+    const display = buildToolDisplay("tool", detail, null, status);
+    const nextItem = {
       id: makeId(),
       type: "tool",
       toolUseId: part.id,
@@ -866,19 +998,122 @@ function completeTool(session, part) {
       input: null,
       output: part.output,
       detail,
-      status: part.isError ? "error" : "done",
+      status,
       createdAt: nowIso(),
       completedAt: nowIso(),
-    });
+    };
+    await applyToolVerification(session, nextItem);
+    session.messages.push(nextItem);
     return;
   }
   item.output = part.output;
-  item.status = part.isError ? "error" : "done";
   item.detail = buildToolDetail(item.name, item.input, item.output);
-  const display = buildToolDisplay(item.name, item.detail, item.input);
+  item.status = toolCompletionStatus(item.name, item.detail, part);
+  await applyToolVerification(session, item);
+  const display = buildToolDisplay(item.name, item.detail, item.input, item.status);
   item.displayName = display.displayName;
   item.summary = display.summary;
   item.completedAt = nowIso();
+}
+
+async function applyToolVerification(session, item) {
+  const detail = item?.detail;
+  if (!detail || !["write", "edit", "read"].includes(detail.type)) return;
+  detail.verification = await verifyFileTool(session, detail);
+  if (detail.verification.status !== "verified") {
+    item.status = "error";
+  }
+}
+
+async function verifyFileTool(session, detail) {
+  const checkedAt = nowIso();
+  const rawPath = String(detail.filePath || "").trim();
+  if (!rawPath) {
+    return {
+      status: "missing-path",
+      label: "未确认文件路径",
+      checkedAt,
+    };
+  }
+
+  const workspace = path.resolve(session.cwd || userDir(session.username || ""));
+  const resolvedPath = path.resolve(workspace, rawPath);
+  const expected = expectedFileBasenamesFromLatestUser(session);
+  const basename = path.basename(resolvedPath);
+  if (expected.length === 1 && basename !== expected[0]) {
+    return {
+      status: "path-mismatch",
+      label: `目标文件偏离请求：应为 ${expected[0]}`,
+      expectedBasename: expected[0],
+      actualBasename: basename,
+      checkedAt,
+    };
+  }
+  if (!isPathInside(workspace, resolvedPath)) {
+    return {
+      status: "outside-workspace",
+      label: "文件不在当前工作区",
+      checkedAt,
+    };
+  }
+
+  let content = "";
+  try {
+    content = await fsp.readFile(resolvedPath, "utf8");
+  } catch (error) {
+    return {
+      status: "missing",
+      label: "未在工作区找到这个文件",
+      checkedAt,
+    };
+  }
+
+  if (detail.type === "write") {
+    const expectedContent = String(detail.content || "").trim();
+    if (expectedContent && !content.includes(expectedContent)) {
+      return {
+        status: "content-mismatch",
+        label: "文件内容未通过核验",
+        checkedAt,
+      };
+    }
+  }
+  if (detail.type === "edit") {
+    const nextText = String(detail.newString || "").trim();
+    if (nextText && !content.includes(nextText)) {
+      return {
+        status: "content-mismatch",
+        label: "修改内容未通过核验",
+        checkedAt,
+      };
+    }
+  }
+
+  return {
+    status: "verified",
+    label: detail.type === "read" ? "已核验文件存在" : detail.type === "edit" ? "已核验修改结果" : "已核验写入结果",
+    checkedAt,
+  };
+}
+
+function expectedFileBasenamesFromLatestUser(session) {
+  const user = [...(session.messages || [])].reverse().find((item) => item?.type === "user" && item.text);
+  return extractMentionedFileBasenames(user?.text || "");
+}
+
+function extractMentionedFileBasenames(text) {
+  const matches = new Set();
+  const pattern =
+    /(?<![\w.-])([A-Za-z0-9][A-Za-z0-9._-]{0,120}\.(?:txt|md|markdown|json|ya?ml|js|jsx|ts|tsx|css|html|py|sh|rb|go|rs|java|kt|swift|c|cc|cpp|h|hpp|sql|csv|log|env|toml|lock))(?![\w.-])/gi;
+  for (const match of String(text || "").matchAll(pattern)) {
+    matches.add(path.basename(match[1]));
+  }
+  return [...matches];
+}
+
+function isPathInside(parent, child) {
+  const relative = path.relative(parent, child);
+  return relative === "" || (relative && !relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function upsertTodo(session, items) {
@@ -916,22 +1151,60 @@ function extractTodoItems(input) {
   return items.length > 0 ? items : null;
 }
 
-function buildToolDisplay(name, detail, input) {
+function buildToolDisplay(name, detail, input, status = "") {
   const lower = String(name || "").toLowerCase();
-  if (detail.type === "shell") return { displayName: "执行命令", summary: detail.command };
-  if (detail.type === "read") return { displayName: "读取文件", summary: shortenPath(detail.filePath) };
-  if (detail.type === "write") return { displayName: "写入文件", summary: fileChangeSummary(detail, "write") };
-  if (detail.type === "edit") return { displayName: "修改文件", summary: fileChangeSummary(detail, "edit") };
-  if (detail.type === "search") return { displayName: "搜索内容", summary: detail.query };
-  if (detail.type === "fetch") return { displayName: "获取网页", summary: detail.url };
+  if (detail.type === "plan") {
+    return { displayName: "准备计划", summary: detail.confirmation ? "等待确认后执行" : "执行前计划已生成" };
+  }
+  const completed = status === "done" || status === "completed";
+  if (detail.type === "shell")
+    return { displayName: shellToolTitle(detail.command || "", completed ? "done" : "running"), summary: shellToolSummary(detail.command || "") };
+  if (detail.type === "read") return { displayName: completed ? "已读取文件" : "正在读取文件", summary: fileReadSummary(detail) };
+  if (detail.type === "write") return { displayName: completed ? "已写入文件" : "正在写入文件", summary: fileChangeSummary(detail, "write") };
+  if (detail.type === "edit") return { displayName: completed ? "已修改文件" : "正在修改文件", summary: fileChangeSummary(detail, "edit") };
+  if (detail.type === "search") return { displayName: completed ? "已搜索内容" : "正在搜索内容", summary: detail.query };
+  if (detail.type === "fetch") return { displayName: completed ? "已获取网页" : "正在获取网页", summary: detail.url };
   if (lower.includes("todo")) return { displayName: "任务清单", summary: "" };
   return { displayName: humanizeToolName(name || "Tool"), summary: summarizeUnknownToolInput(input) };
+}
+
+function shellToolTitle(command = "", status = "") {
+  const normalized = normalizeCommand(command);
+  const running = status === "running" || status === "streaming";
+  const done = status === "done" || status === "completed";
+  if (/^pwd\s*$/.test(normalized)) return running ? "正在查看工作区" : done ? "已查看工作区" : "查看工作区";
+  if (/^(ls|find)\b/.test(normalized)) return running ? "正在查看文件列表" : done ? "已查看文件列表" : "查看文件列表";
+  if (/^(rg|grep)\b/.test(normalized)) return running ? "正在搜索内容" : done ? "已搜索内容" : "搜索内容";
+  if (/\bsleep\s+\d+/.test(normalized)) return running ? "长任务处理中" : done ? "长任务已完成" : "长任务处理";
+  if (running) return "正在运行本机命令";
+  if (done) return "已运行本机命令";
+  return "运行本机命令";
+}
+
+function shellToolSummary(command = "") {
+  const normalized = normalizeCommand(command);
+  if (/^pwd\s*$/.test(normalized)) return "当前工作区";
+  if (/^(ls|find)\b/.test(normalized)) return "查看文件和文件夹";
+  if (/^(rg|grep)\b/.test(normalized)) return "搜索工作区内容";
+  if (/\bsleep\s+\d+/.test(normalized)) return "后台长任务";
+  return command;
+}
+
+function normalizeCommand(command = "") {
+  return String(command || "").trim().replace(/\s+/g, " ");
 }
 
 function fileChangeSummary(detail, type) {
   const file = shortenPath(detail.filePath || "");
   const change = fileChangeLabel(detail, type);
-  return [file, change].filter(Boolean).join(" · ");
+  const verification = detail.verification?.label || "";
+  return [file, change, verification].filter(Boolean).join(" · ");
+}
+
+function fileReadSummary(detail) {
+  const file = shortenPath(detail.filePath || "");
+  const verification = detail.verification?.label || "";
+  return [file, verification].filter(Boolean).join(" · ");
 }
 
 function fileChangeLabel(detail, type) {
@@ -967,6 +1240,15 @@ function shortenPath(value) {
 
 function buildToolDetail(name, input, output) {
   const lower = String(name || "").toLowerCase();
+  if (isPlanApprovalTool(lower)) {
+    return {
+      type: "plan",
+      filePath: readFirstString(input, ["planFilePath", "plan_file_path", "file_path", "filePath"]) || "",
+      content: readFirstString(input, ["plan", "content", "text"]) || extractText(output),
+      output: extractText(output),
+      confirmation: true,
+    };
+  }
   if (isShellTool(lower)) {
     return {
       type: "shell",
@@ -986,10 +1268,21 @@ function buildToolDetail(name, input, output) {
     };
   }
   if (isWriteTool(lower)) {
+    const filePath = readFirstString(input, ["file_path", "filePath", "path"]) || "";
+    const content = readFirstString(input, ["content", "text"]) || extractText(output);
+    if (isClaudePlanPath(filePath)) {
+      return {
+        type: "plan",
+        filePath,
+        content,
+        output: extractText(output),
+        confirmation: false,
+      };
+    }
     return {
       type: "write",
-      filePath: readFirstString(input, ["file_path", "filePath", "path"]) || "",
-      content: readFirstString(input, ["content", "text"]) || extractText(output),
+      filePath,
+      content,
     };
   }
   if (isEditTool(lower)) {
@@ -1034,6 +1327,19 @@ function isReadTool(lower) {
 
 function isWriteTool(lower) {
   return ["write", "write_file", "create_file"].includes(lower);
+}
+
+function isPlanApprovalTool(lower) {
+  return ["exitplanmode", "exit_plan_mode", "exit-plan-mode"].includes(lower);
+}
+
+function isClaudePlanPath(value) {
+  return /(^|\/)\.claude\/plans\/[^/]+\.md$/i.test(String(value || ""));
+}
+
+function toolCompletionStatus(name, detail, part) {
+  if (part.isError && !(detail?.type === "plan" || isPlanApprovalTool(String(name || "").toLowerCase()))) return "error";
+  return "done";
 }
 
 function isEditTool(lower) {
@@ -1159,45 +1465,75 @@ function compactJson(value) {
 
 async function finishClaudeTurn(username, sessionId, assistantId, result) {
   const key = jobKey(username, sessionId);
+  const job = jobs.get(key);
+  if (job?.watchdog) clearInterval(job.watchdog);
+  if (job?.forceKillTimer) clearTimeout(job.forceKillTimer);
   jobs.delete(key);
   const session = await readSession(username, sessionId);
   if (!session) return;
   const stoppedByUser = Boolean(result.stoppedByUser);
   const assistant = session.messages.find((item) => item.id === assistantId);
+  const softCompleted = shouldTreatNonZeroExitAsCompleted(result, assistant);
+  const completedOk = Boolean(result.ok || softCompleted);
+  const resultMessage =
+    !completedOk && !stoppedByUser && assistantTextLooksLikeRuntimeError(assistant?.text)
+      ? userFacingRuntimeMessage(assistant.text)
+      : result.message;
   if (assistant) {
-    assistant.status = stoppedByUser ? "canceled" : result.ok ? "done" : "error";
+    assistant.status = stoppedByUser ? "canceled" : completedOk ? "done" : "error";
     assistant.completedAt = nowIso();
     assistant.durationMs = Math.max(
       0,
       new Date(assistant.completedAt).getTime() - new Date(assistant.startedAt || assistant.createdAt).getTime(),
     );
     if (session.usage) assistant.usage = session.usage;
-    if (!assistant.text && result.message) {
-      assistant.text = result.message;
+    if (!assistant.text && resultMessage) {
+      assistant.text = resultMessage;
     }
   }
   for (const item of session.messages) {
     if (item.type === "tool" && item.status === "running") {
-      item.status = stoppedByUser ? "canceled" : result.ok ? "done" : "error";
+      item.status = stoppedByUser ? "canceled" : completedOk ? "done" : "error";
     }
     if (item.type === "thinking" && item.status === "streaming") item.status = "done";
   }
-  session.status = result.ok || stoppedByUser ? "idle" : "error";
-  if (result.ok && session.claudeSessionId) session.claudeSessionStarted = true;
-  session.lastError = result.ok || stoppedByUser ? null : result.message;
-  if (!result.ok && !stoppedByUser && result.message) {
+  session.status = completedOk || stoppedByUser ? "idle" : "error";
+  if (completedOk && session.claudeSessionId) session.claudeSessionStarted = true;
+  session.lastError = completedOk || stoppedByUser ? null : resultMessage;
+  if (!completedOk && !stoppedByUser && resultMessage) {
     session.messages.push({
       id: makeId(),
       type: "error",
-      message: result.message,
+      message: resultMessage,
       createdAt: nowIso(),
     });
   }
+  const latestStored = await readStoredSession(username, sessionId);
+  if (latestStored) {
+    session.title = latestStored.title || session.title;
+    session.mode = latestStored.mode || session.mode;
+    session.model = latestStored.model || session.model;
+    session.archivedAt = latestStored.archivedAt || session.archivedAt || null;
+  }
   await saveSession(username, session);
-  broadcast(username, sessionId, "done", { ok: result.ok, message: result.message });
+  broadcast(username, sessionId, "done", { ok: completedOk, message: softCompleted ? "" : resultMessage });
+}
+
+function shouldTreatNonZeroExitAsCompleted(result, assistant) {
+  if (!result || result.ok || result.stoppedByUser) return false;
+  const text = String(assistant?.text || "").trim();
+  if (!text || assistantTextLooksLikeRuntimeError(text)) return false;
+  return /^Local engine exited with code \d+(?: \([^)]+\))?\.$/i.test(String(result.message || "").trim());
+}
+
+function assistantTextLooksLikeRuntimeError(text) {
+  return /^(API Error|Error|Local engine exited)\b/i.test(text) || /Insufficient Balance|rate limit|unauthorized/i.test(text);
 }
 
 async function stopClaudeTurn(username, sessionId) {
+  if (paseoBridge) {
+    return paseoBridge.stopTurn(username, sessionId);
+  }
   const key = jobKey(username, sessionId);
   const job = jobs.get(key);
   if (!job) return false;
@@ -1209,13 +1545,16 @@ async function stopClaudeTurn(username, sessionId) {
   await finishClaudeTurn(username, sessionId, job.assistantId, {
     ok: false,
     stoppedByUser: true,
-    message: "已停止生成",
+    message: "已取消本次请求",
   });
   return true;
 }
 
-async function detectClaude(username) {
-  const settings = await readSettings(username);
+async function detectClaude(username, settingsOverride = null) {
+  const settings = settingsOverride || (await readSettings(username));
+  if (paseoBridge) {
+    return paseoBridge.detectClaude(settings);
+  }
   const command = settings.claudePath || "claude";
   const resolved = resolveCommand(command);
   if (!resolved) {
@@ -1273,6 +1612,21 @@ function executableForCommand(command) {
   return resolveCommand(command) || command;
 }
 
+let cachedClaudeHarnessEnv = null;
+
+function readClaudeHarnessEnv() {
+  if (cachedClaudeHarnessEnv) return cachedClaudeHarnessEnv;
+  try {
+    const file = path.join(os.homedir(), ".claude", "settings.json");
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    cachedClaudeHarnessEnv =
+      parsed?.env && typeof parsed.env === "object" && !Array.isArray(parsed.env) ? parsed.env : {};
+  } catch {
+    cachedClaudeHarnessEnv = {};
+  }
+  return cachedClaudeHarnessEnv;
+}
+
 function envForExecutable(executable) {
   const dir = executable.includes("/") || executable.includes("\\") ? path.dirname(executable) : "";
   const pathParts = [
@@ -1282,12 +1636,27 @@ function envForExecutable(executable) {
     "/usr/local/bin",
     process.env.PATH || "",
   ].filter(Boolean);
-  return {
+  const harness = readClaudeHarnessEnv();
+  const env = {
     ...process.env,
     PATH: pathParts.join(path.delimiter),
     FORCE_COLOR: "0",
     CLAUDE_CODE_SKIP_PROMPT_HISTORY: "0",
   };
+  const harnessKeys = [
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "API_TIMEOUT_MS",
+  ];
+  for (const key of harnessKeys) {
+    const value = harness[key];
+    if (value != null && value !== "") env[key] = String(value);
+  }
+  return env;
 }
 
 function probeVersion(command) {
@@ -1360,6 +1729,15 @@ function sendError(res, error) {
 async function routeApi(req, res, url) {
   const method = req.method || "GET";
   const pathname = url.pathname;
+
+  if (pathname === "/api/health" && method === "GET") {
+    return sendJson(res, 200, {
+      ok: true,
+      service: "zhiguo",
+      timestamp: nowIso(),
+      publicUrl: process.env.ZHIGUO_PUBLIC_URL || null,
+    });
+  }
 
   if (pathname === "/api/me" && method === "GET") {
     const username = await readAuthCookie(req);
@@ -1442,8 +1820,16 @@ async function routeApi(req, res, url) {
     return sendJson(res, 200, { settings, claude });
   }
 
+  if (pathname === "/api/config/check" && method === "POST") {
+    const settings = mergeSettingsPatch(await readSettings(username), await readBody(req));
+    const claude = await detectClaude(username, settings);
+    return sendJson(res, 200, { settings, claude });
+  }
+
   if (pathname === "/api/sessions" && method === "GET") {
-    return sendJson(res, 200, { sessions: await listSessions(username) });
+    return sendJson(res, 200, {
+      sessions: await listSessions(username, { archived: url.searchParams.get("archived") === "1" }),
+    });
   }
 
   if (pathname === "/api/sessions" && method === "POST") {
@@ -1464,6 +1850,9 @@ async function routeApi(req, res, url) {
     if (!action && method === "PATCH") {
       const session = await readSession(username, sessionId);
       if (!session) return sendJson(res, 404, { error: "Session not found." });
+      if (session.status === "running") {
+        return sendJson(res, 409, { error: "当前回复结束后再重命名这个会话。" });
+      }
       const body = await readBody(req);
       if (typeof body.title === "string") session.title = body.title.trim() || session.title;
       if (typeof body.mode === "string") session.mode = cleanMode(body.mode, session.mode);
@@ -1573,8 +1962,24 @@ function contentType(file) {
   return "application/octet-stream";
 }
 
+async function initPaseoCore() {
+  const { startPaseoRuntime } = await import("./server/paseo-runtime.mjs");
+  const { createPaseoBridge } = await import("./server/paseo-bridge.mjs");
+  paseoRuntime = await startPaseoRuntime({
+    paseoHome: PASEO_HOME,
+    listen: PASEO_LISTEN,
+  });
+  paseoBridge = createPaseoBridge(paseoRuntime, {
+    onDone: (username, sessionId, result) => {
+      broadcast(username, sessionId, "done", result);
+    },
+  });
+  await paseoBridge.connect();
+}
+
 async function main() {
   await ensureBaseDirs();
+  await initPaseoCore();
   const server = http.createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
@@ -1592,7 +1997,20 @@ async function main() {
     console.log(`Zhiguo app listening on http://${HOST}:${PORT}`);
     console.log(`User info root: ${USERINFO_ROOT}`);
     console.log(`User folders: ${USERS_ROOT}`);
+    console.log(`Paseo home: ${PASEO_HOME}`);
+    console.log(`Paseo listen: ${PASEO_LISTEN}`);
   });
+
+  const shutdown = async () => {
+    if (paseoBridge) await paseoBridge.close().catch(() => undefined);
+    if (paseoRuntime) {
+      const { stopPaseoRuntime } = await import("./server/paseo-runtime.mjs");
+      await stopPaseoRuntime(paseoRuntime).catch(() => undefined);
+    }
+    server.close(() => process.exit(0));
+  };
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
 }
 
 main().catch((error) => {

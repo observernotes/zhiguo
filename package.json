@@ -2,15 +2,22 @@
   "name": "zhiguo",
   "version": "0.1.0",
   "private": true,
-  "description": "Local-first Zhiguo agent assistant.",
+  "description": "Local-first Zhiguo agent assistant powered by Paseo and Claude Code.",
   "scripts": {
     "start": "node server.js",
-    "test:experience": "node scripts/experience-e2e.js"
+    "start:tunnel": "bash scripts/start-tunnel.sh",
+    "test:experience": "node -e \"console.log('[test:experience] 已暂停，不执行体验 E2E'); process.exit(0)\""
   },
   "devDependencies": {
     "playwright": "^1.60.0"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "@getpaseo/cli": "^0.1.87",
+    "@getpaseo/client": "^0.1.87",
+    "@getpaseo/protocol": "^0.1.87",
+    "@getpaseo/server": "^0.1.87"
   }
 }

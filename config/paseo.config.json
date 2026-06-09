@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "daemon": {
+    "listen": "127.0.0.1:6767",
+    "hostnames": ["localhost", "127.0.0.1"],
+    "relay": { "enabled": false },
+    "mcp": { "enabled": false, "injectIntoAgents": false },
+    "appendSystemPrompt": "You are running inside 智果 (Zhiguo), a local-first web product. Preserve user-provided filenames, paths, numbers, and quoted strings exactly when using file tools. After writing or editing files, verify the exact requested path and content, then keep users informed about code actions, files changed, and verification steps."
+  },
+  "agents": {
+    "providers": {
+      "codex": { "enabled": false },
+      "copilot": { "enabled": false },
+      "opencode": { "enabled": false },
+      "pi": { "enabled": false }
+    }
+  },
+  "features": {
+    "dictation": { "enabled": false },
+    "voiceMode": { "enabled": false }
+  },
+  "log": {
+    "console": { "level": "warn", "format": "pretty" },
+    "file": { "level": "info", "path": "daemon.log" }
+  }
+}

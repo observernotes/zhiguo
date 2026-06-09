@@ -1,5 +1,6 @@
 data/
 users/
+.paseo-home/
 node_modules/
 artifacts/
 dist/
@@ -7,5 +8,9 @@ android/.gradle/
 android/app/build/
 *.keystore
 .env
+.env.local
+deploy/frpc.ini
+logs/
+.zhiguo-server.pid
 .DS_Store
 *.log
